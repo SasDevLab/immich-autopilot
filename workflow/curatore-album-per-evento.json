@@ -1,0 +1,347 @@
+[
+  {
+    "name": "Curatore Immich - album per evento",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "days",
+                "triggerAtHour": 5,
+                "triggerAtMinute": 15
+              }
+            ]
+          }
+        },
+        "id": "c1",
+        "name": "Ogni notte",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -660,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "-- Di cosa e' fatto ogni periodo di foto non ancora catalogate.\n--\n-- Nessun valore e' scritto qui dentro: tutto viene da curatore_config, cosi'\n-- si regola senza toccare il workflow.\n--\n-- Le STATISTICHE si calcolano su tutto l'archivio, perche' quanto una parola\n-- sia \"vicina a tutto\" e' una proprieta' della parola, non delle foto nuove.\n-- Gli EVENTI invece si formano solo con le foto fuori da ogni album: cosi' il\n-- curatore non duplica nulla e non tocca quello che l'utente ha organizzato.\nWITH cfg AS (\n  SELECT\n    max(valore) FILTER (WHERE chiave='proprietario')    AS proprietario,\n    max(valore) FILTER (WHERE chiave='fuso_orario')     AS fuso,\n    max(valore) FILTER (WHERE chiave='soglia_scena')::numeric    AS soglia,\n    max(valore) FILTER (WHERE chiave='presenza_minima')::numeric AS presenza,\n    max(valore) FILTER (WHERE chiave='foto_minime')::int         AS minime,\n    max(valore) FILTER (WHERE chiave='vuoto_giorni')::int        AS vuoto,\n    max(valore) FILTER (WHERE chiave='durata_massima')::int      AS durata\n  FROM curatore_config\n),\nsim AS (\n  SELECT s.\"assetId\" aid, d.parola, 1 - (s.embedding <=> d.vettore) v\n  FROM smart_search s\n  CROSS JOIN curatore_dizionario d\n  JOIN asset a ON a.id = s.\"assetId\" AND a.\"deletedAt\" IS NULL\n),\nstat AS (SELECT parola, avg(v) m, stddev_pop(v) sd FROM sim GROUP BY parola),\nforti AS (\n  -- una foto \"contiene\" un concetto quando si stacca dalla media di QUELLA\n  -- parola: senza questa normalizzazione vincerebbero sempre i termini che\n  -- somigliano un po' a tutto\n  SELECT sim.aid, sim.parola\n  FROM sim JOIN stat ON stat.parola = sim.parola, cfg\n  WHERE stat.sd > 0 AND (sim.v - stat.m) / stat.sd >= cfg.soglia\n),\nlibere AS (\n  SELECT a.id aid, (a.\"fileCreatedAt\" AT TIME ZONE (SELECT fuso FROM cfg))::date g, e.city\n  FROM asset a\n  JOIN \"user\" u ON u.id = a.\"ownerId\"\n  LEFT JOIN asset_exif e ON e.\"assetId\" = a.id, cfg\n  WHERE a.\"deletedAt\" IS NULL\n    AND (cfg.proprietario = '' OR u.email = cfg.proprietario)\n    AND EXISTS (SELECT 1 FROM smart_search s WHERE s.\"assetId\" = a.id)\n    AND NOT EXISTS (SELECT 1 FROM album_asset aa WHERE aa.\"assetId\" = a.id)\n),\ndistinti AS (SELECT DISTINCT g FROM libere),\nmarcati AS (\n  SELECT g, CASE WHEN lag(g) OVER (ORDER BY g) IS NULL\n                   OR g - lag(g) OVER (ORDER BY g) > (SELECT vuoto FROM cfg)\n                 THEN 1 ELSE 0 END n\n  FROM distinti\n),\nisole AS (SELECT g, sum(n) OVER (ORDER BY g) isola FROM marcati),\nev AS (SELECT i.isola, l.aid, l.g, l.city FROM libere l JOIN isole i ON i.g = l.g),\ndim AS (SELECT isola, count(DISTINCT aid) n FROM ev GROUP BY isola),\ncomp AS (\n  -- i parametri si leggono con sottointerrogazioni scalari, non unendo cfg:\n  -- una colonna di cfg dentro HAVING andrebbe raggruppata, e il senso si perde\n  SELECT ev.isola, f.parola,\n         round(count(DISTINCT f.aid)::numeric / max(dim.n), 3) quota\n  FROM ev JOIN forti f ON f.aid = ev.aid JOIN dim ON dim.isola = ev.isola\n  GROUP BY ev.isola, f.parola\n  HAVING count(DISTINCT f.aid)::numeric / max(dim.n)\n         >= (SELECT presenza FROM cfg)\n)\nSELECT min(ev.g)::text AS dal,\n       max(ev.g)::text AS al,\n       max(dim.n)      AS quante,\n       mode() WITHIN GROUP (ORDER BY ev.city) FILTER (WHERE ev.city IS NOT NULL) AS citta,\n       (SELECT json_object_agg(c.parola, c.quota) FROM comp c WHERE c.isola = ev.isola) AS concetti,\n       json_agg(DISTINCT ev.aid) AS ids,\n       -- un album gia' creato che confina con questo periodo: si allunga invece\n       -- di crearne un secondo, cosi' un viaggio di piu' giorni resta unito\n       (SELECT ca.album_id FROM curatore_album ca\n         WHERE ca.al >= min(ev.g) - 2 AND ca.dal <= max(ev.g) + 2\n         ORDER BY ca.al DESC LIMIT 1) AS album_da_estendere,\n       (SELECT json_agg(json_build_object('tipo', r.tipo, 'necessarie', r.necessarie,\n                                          'prove', r.prove, 'escluse', r.escluse))\n          FROM curatore_regole r WHERE r.attiva) AS regole,\n       (SELECT max(valore) FROM curatore_config WHERE chiave='margine')::numeric AS margine,\n       (SELECT max(valore) FROM curatore_config WHERE chiave='presenza_minima')::numeric AS presenza,\n       (SELECT max(valore) FROM curatore_config WHERE chiave='immich_url') AS immich_url\nFROM ev JOIN dim ON dim.isola = ev.isola\nGROUP BY ev.isola\nHAVING max(dim.n) >= (SELECT minime FROM cfg)\n   AND max(ev.g) - min(ev.g) <= (SELECT durata FROM cfg)\nORDER BY min(ev.g);\n",
+          "options": {}
+        },
+        "id": "c2",
+        "name": "Di cosa sono fatti gli eventi",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          -440,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Decide che tipo di evento e' un periodo, guardando di cosa e' fatto.\n//\n// Le regole arrivano dal database (curatore_regole), non da qui: si cambiano\n// con un UPDATE senza ritoccare il workflow. Anche le soglie arrivano dalla\n// query, che le legge da curatore_config.\n//\n// Ogni regola ha tre parti:\n//   necessarie : liste di parole, di ognuna almeno una deve esserci. Senza una\n//                chiesa non e' un battesimo, per quante foto di neonati ci siano.\n//   prove      : parole che rafforzano, pesate su quanto sono diffuse.\n//   escluse    : parole che, se piu' forti di ogni prova, smentiscono la regola.\nconst MESI = ['gennaio','febbraio','marzo','aprile','maggio','giugno','luglio',\n              'agosto','settembre','ottobre','novembre','dicembre'];\n\nfunction comeLista(x) { return typeof x === 'string' ? JSON.parse(x) : x; }\n\nfunction decidi(c, regole, presenza) {\n  const esiti = [];\n  for (const r of regole) {\n    const nec = comeLista(r.necessarie), pro = comeLista(r.prove);\n    const esc = comeLista(r.escluse || []);\n    if (!nec.every(g => g.some(p => (c[p] || 0) >= presenza))) continue;\n    const prove = pro.filter(p => (c[p] || 0) >= presenza);\n    if (!prove.length) continue;\n    const forzaEscl = Math.max(0, ...esc.map(p => c[p] || 0));\n    if (forzaEscl > Math.max(...prove.map(p => c[p]))) continue;\n    const punti = prove.reduce((s, p) =>\n      s + Math.min(c[p], 0.4) + 0.25 * Math.min(1, c[p] / 0.12), 0);\n    esiti.push({ punti, tipo: r.tipo, prove });\n  }\n  esiti.sort((a, b) => b.punti - a.punti);\n  if (!esiti.length) return { tipo: null, prove: [], distacco: 0 };\n  const d = esiti.length === 1 ? esiti[0].punti : esiti[0].punti - esiti[1].punti;\n  return { tipo: esiti[0].tipo, prove: esiti[0].prove, distacco: d };\n}\n\nconst fuori = [];\nfor (const it of items) {\n  const d = it.json;\n  const ids = comeLista(d.ids);\n  if (!ids || !ids.length) continue;\n  const c0 = comeLista(d.concetti) || {};\n  const c = {}; for (const k in c0) c[k] = Number(c0[k]);\n  const regole = comeLista(d.regole) || [];\n  const presenza = Number(d.presenza), margine = Number(d.margine);\n\n  const { tipo, prove, distacco } = decidi(c, regole, presenza);\n  const dal = new Date(d.dal), al = new Date(d.al);\n  const mese = MESI[dal.getMonth()], anno = dal.getFullYear();\n  let periodo;\n  if (d.dal === d.al) periodo = dal.getDate() + ' ' + mese + ' ' + anno;\n  else if (dal.getMonth() === al.getMonth())\n    periodo = dal.getDate() + '-' + al.getDate() + ' ' + mese + ' ' + anno;\n  else periodo = dal.getDate() + ' ' + mese + ' - ' + al.getDate() + ' ' +\n                 MESI[al.getMonth()] + ' ' + anno;\n\n  const luogo = d.citta ? (' a ' + d.citta) : '';\n  // niente nome quando le prove non bastano: un titolo sbagliato e' peggio\n  const nome = (tipo && distacco >= margine)\n      ? (tipo + luogo + ', ' + mese + ' ' + anno)\n      : ((d.citta ? d.citta + ', ' : '') + periodo);\n\n  fuori.push({ json: {\n    azione: d.album_da_estendere ? 'estendi' : 'crea',\n    album_id: d.album_da_estendere || null,\n    immich_url: d.immich_url,\n    nome, ids, dal: d.dal, al: d.al, quante: ids.length,\n    riconosciuto: (tipo && distacco >= margine) ? tipo : null,\n    prove: prove.map(p => p + ' ' + Math.round(c[p] * 100) + '%').join(', '),\n    distacco: Math.round(distacco * 100) / 100,\n  }});\n}\nreturn fuori;\n"
+        },
+        "id": "c3",
+        "name": "Riconosci e dai un nome",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -220,
+          0
+        ],
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.azione }}",
+                "rightValue": "crea",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        },
+        "id": "c4",
+        "name": "Nuovo o da allungare?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          0,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json.immich_url }}/api/albums",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ albumName: $json.nome, assetIds: $json.ids }) }}",
+          "options": {}
+        },
+        "id": "c5",
+        "name": "Crea album",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          -110
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": true,
+        "maxTries": 2
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "={{ $json.immich_url }}/api/albums/{{ $json.album_id }}/assets",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ ids: $json.ids }) }}",
+          "options": {}
+        },
+        "id": "c6",
+        "name": "Allunga album esistente",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          110
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": true,
+        "maxTries": 2
+      },
+      {
+        "parameters": {
+          "jsCode": "const fuori = [];\nconst orig = $('Riconosci e dai un nome').all();\nfor (let i = 0; i < items.length; i++) {\n  const r = items[i].json;\n  const o = orig[i] ? orig[i].json : {};\n  const id = r.id || o.album_id;\n  if (!id) continue;\n  fuori.push({ json: { album_id: id, dal: o.dal, al: o.al, nome: o.nome,\n                       quante: o.quante, riconosciuto: o.riconosciuto, prove: o.prove } });\n}\nreturn fuori;"
+        },
+        "id": "c7",
+        "name": "Raccogli esito",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          0
+        ],
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO curatore_album (album_id, dal, al, aggiornato)\nVALUES ('{{ $json.album_id }}', '{{ $json.dal }}', '{{ $json.al }}', now())\nON CONFLICT (album_id) DO UPDATE SET dal = LEAST(curatore_album.dal, EXCLUDED.dal),\n  al = GREATEST(curatore_album.al, EXCLUDED.al), aggiornato = now();",
+          "options": {}
+        },
+        "id": "c8",
+        "name": "Annota l album",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          660,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "chatId": "INSERIRE_CHAT_ID",
+          "text": "=[Curatore Immich] errore.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nNessun album e' stato lasciato a meta'.",
+          "additionalFields": {}
+        },
+        "id": "c9",
+        "name": "Avvisa SOLO se fallisce",
+        "type": "n8n-nodes-base.telegram",
+        "typeVersion": 1.2,
+        "position": [
+          660,
+          220
+        ],
+        "credentials": {
+          "telegramApi": {
+            "id": "REPLACE_TELEGRAM",
+            "name": "Telegram"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Ogni notte": {
+        "main": [
+          [
+            {
+              "node": "Di cosa sono fatti gli eventi",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Di cosa sono fatti gli eventi": {
+        "main": [
+          [
+            {
+              "node": "Riconosci e dai un nome",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Avvisa SOLO se fallisce",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Riconosci e dai un nome": {
+        "main": [
+          [
+            {
+              "node": "Nuovo o da allungare?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Avvisa SOLO se fallisce",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Nuovo o da allungare?": {
+        "main": [
+          [
+            {
+              "node": "Crea album",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Allunga album esistente",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Crea album": {
+        "main": [
+          [
+            {
+              "node": "Raccogli esito",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Avvisa SOLO se fallisce",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Allunga album esistente": {
+        "main": [
+          [
+            {
+              "node": "Raccogli esito",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Avvisa SOLO se fallisce",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Raccogli esito": {
+        "main": [
+          [
+            {
+              "node": "Annota l album",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Avvisa SOLO se fallisce",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Annota l album": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Avvisa SOLO se fallisce",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "saveDataErrorExecution": "all",
+      "saveDataSuccessExecution": "all"
+    }
+  }
+]

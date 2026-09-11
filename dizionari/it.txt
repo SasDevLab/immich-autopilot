@@ -1,0 +1,32 @@
+# Dizionario italiano: concetti comuni con cui descrivere una foto.
+#
+# Non e un elenco scritto guardando un archivio particolare: sono parole
+# ordinarie, e questo e cio che rende il curatore riutilizzabile altrove.
+#
+# Aggiungere parole e legittimo e utile: piu il dizionario e ricco, piu eventi
+# si possono riconoscere. Dopo averle aggiunte, rilanciare popola-dizionario.py,
+# che calcola solo le nuove.
+#
+# Righe vuote e righe che iniziano con # vengono ignorate.
+
+chiesa altare cerimonia matrimonio sposa sposo anello bouquet torta candeline
+festa ballo brindisi banchetto ristorante tavola cibo piatto bicchiere vino
+neonato bambino bambina culla passeggino peluche giocattolo scarpine fasciatoio
+gravidanza pancione famiglia genitori nonni nonna nonno fratello sorella zio
+spiaggia mare onde sabbia ombrellone piscina barca porto scogli faro
+tramonto alba notte giorno sole pioggia neve nebbia nuvole cielo
+montagna sci bosco albero prato fiore fiori campagna collina lago fiume cascata
+citta piazza monumento museo castello palazzo strada vicolo ponte
+automobile macchina moto bicicletta treno aereo nave stazione aeroporto valigia
+viaggio vacanza hotel camera tenda campeggio
+compleanno regalo palloncini natale presepe pasqua carnevale halloween
+scuola classe laurea diploma ufficio computer telefono schermo documento libro
+cane gatto cavallo uccello pesce animale
+ritratto volto sorriso occhi capelli mano piedi persona gruppo folla
+sport calcio pallone palestra corsa gara squadra maglia medaglia
+concerto musica chitarra pianoforte palco luci fuochi
+cucina casa salotto giardino terrazzo balcone
+vestito abito bianco nero rosso elegante cravatta scarpe cappello
+selfie specchio
+prete suora sacerdote battesimo comunione cresima funerale
+dolce gelato pizza pasta caffe
