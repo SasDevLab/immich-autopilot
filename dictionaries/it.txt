@@ -4,7 +4,7 @@
 # ordinarie, e questo e cio che rende il curatore riutilizzabile altrove.
 #
 # Aggiungere parole e legittimo e utile: piu il dizionario e ricco, piu eventi
-# si possono riconoscere. Dopo averle aggiunte, rilanciare popola-dizionario.py,
+# si possono riconoscere. Dopo averle aggiunte, rilanciare build-dictionary.py,
 # che calcola solo le nuove.
 #
 # Righe vuote e righe che iniziano con # vengono ignorate.

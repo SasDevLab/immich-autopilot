@@ -1,0 +1,347 @@
+[
+  {
+    "name": "Immich curator - albums by event",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "days",
+                "triggerAtHour": 5,
+                "triggerAtMinute": 15
+              }
+            ]
+          }
+        },
+        "id": "e1",
+        "name": "Every night",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -660,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "-- What each not-yet-filed period of photos is made of.\n--\n-- Nothing is hard-coded here: every threshold comes from curator_config, so\n-- tuning happens with an UPDATE and no workflow edit.\n--\n-- The STATISTICS are computed over the whole library, because how close a word\n-- sits to everything is a property of the word, not of the new photos. The\n-- EVENTS are formed only from photos outside every album: that way the curator\n-- cannot duplicate anything, and never touches what a person filed by hand.\nWITH cfg AS (\n  SELECT\n    max(value) FILTER (WHERE key='owner_email')    AS owner_email,\n    max(value) FILTER (WHERE key='timezone')       AS tz,\n    max(value) FILTER (WHERE key='word_threshold')::numeric AS word_threshold,\n    max(value) FILTER (WHERE key='min_presence')::numeric   AS min_presence,\n    max(value) FILTER (WHERE key='min_photos')::int         AS min_photos,\n    max(value) FILTER (WHERE key='gap_days')::int           AS gap_days,\n    max(value) FILTER (WHERE key='max_span_days')::int      AS max_span\n  FROM curator_config\n),\nsim AS (\n  SELECT s.\"assetId\" aid, d.word, 1 - (s.embedding <=> d.vector) v\n  FROM smart_search s\n  CROSS JOIN curator_dictionary d\n  JOIN asset a ON a.id = s.\"assetId\" AND a.\"deletedAt\" IS NULL\n),\nstat AS (SELECT word, avg(v) m, stddev_pop(v) sd FROM sim GROUP BY word),\nstrong AS (\n  -- A photo \"contains\" a concept when it stands above that word's own average.\n  -- Without this normalisation the words that sit close to everything win every\n  -- time, and the evidence stops meaning anything.\n  SELECT sim.aid, sim.word\n  FROM sim JOIN stat ON stat.word = sim.word\n  WHERE stat.sd > 0\n    AND (sim.v - stat.m) / stat.sd >= (SELECT word_threshold FROM cfg)\n),\nunfiled AS (\n  SELECT a.id aid,\n         (a.\"fileCreatedAt\" AT TIME ZONE (SELECT tz FROM cfg))::date g,\n         e.city\n  FROM asset a\n  JOIN \"user\" u ON u.id = a.\"ownerId\"\n  LEFT JOIN asset_exif e ON e.\"assetId\" = a.id\n  WHERE a.\"deletedAt\" IS NULL\n    AND ((SELECT owner_email FROM cfg) = '' OR u.email = (SELECT owner_email FROM cfg))\n    AND EXISTS (SELECT 1 FROM smart_search s WHERE s.\"assetId\" = a.id)\n    AND NOT EXISTS (SELECT 1 FROM album_asset aa WHERE aa.\"assetId\" = a.id)\n),\ndays AS (SELECT DISTINCT g FROM unfiled),\nmarks AS (\n  SELECT g, CASE WHEN lag(g) OVER (ORDER BY g) IS NULL\n                   OR g - lag(g) OVER (ORDER BY g) > (SELECT gap_days FROM cfg)\n                 THEN 1 ELSE 0 END n\n  FROM days\n),\nislands AS (SELECT g, sum(n) OVER (ORDER BY g) island FROM marks),\nev AS (SELECT i.island, u.aid, u.g, u.city FROM unfiled u JOIN islands i ON i.g = u.g),\nsizes AS (SELECT island, count(DISTINCT aid) n FROM ev GROUP BY island),\ncomposition AS (\n  SELECT ev.island, s.word,\n         round(count(DISTINCT s.aid)::numeric / max(sizes.n), 3) share\n  FROM ev JOIN strong s ON s.aid = ev.aid JOIN sizes ON sizes.island = ev.island\n  GROUP BY ev.island, s.word\n  HAVING count(DISTINCT s.aid)::numeric / max(sizes.n) >= (SELECT min_presence FROM cfg)\n)\nSELECT min(ev.g)::text AS from_date,\n       max(ev.g)::text AS to_date,\n       max(sizes.n)    AS photos,\n       mode() WITHIN GROUP (ORDER BY ev.city) FILTER (WHERE ev.city IS NOT NULL) AS city,\n       (SELECT json_object_agg(c.word, c.share) FROM composition c\n         WHERE c.island = ev.island) AS concepts,\n       json_agg(DISTINCT ev.aid) AS ids,\n       -- an album already created that borders this period: extend it rather\n       -- than start a second one, so a trip spanning nights stays whole\n       (SELECT ca.album_id FROM curator_albums ca\n         WHERE ca.to_date >= min(ev.g) - 2 AND ca.from_date <= max(ev.g) + 2\n         ORDER BY ca.to_date DESC LIMIT 1) AS album_to_extend,\n       (SELECT json_agg(json_build_object('type', r.type, 'required', r.required,\n                                          'evidence', r.evidence, 'against', r.against))\n          FROM curator_rules r WHERE r.active) AS rules,\n       (SELECT max(value) FROM curator_config WHERE key='margin')::numeric AS margin,\n       (SELECT max(value) FROM curator_config WHERE key='min_presence')::numeric AS min_presence,\n       (SELECT max(value) FROM curator_config WHERE key='immich_url') AS immich_url\nFROM ev JOIN sizes ON sizes.island = ev.island\nGROUP BY ev.island\nHAVING max(sizes.n) >= (SELECT min_photos FROM cfg)\n   AND max(ev.g) - min(ev.g) <= (SELECT max_span FROM cfg)\nORDER BY min(ev.g);\n",
+          "options": {}
+        },
+        "id": "e2",
+        "name": "What the periods are made of",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          -440,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Decide what kind of event a period was, from what it is made of.\n//\n// Rules come from the database (curator_rules), not from here: they change\n// with an UPDATE and no workflow edit. Thresholds arrive with the query, which\n// reads them from curator_config.\n//\n// Each rule has three parts:\n//   required : lists of words; at least one from EVERY list must be present.\n//                Without a church it is not a baptism, however many babies\n//                appear. This is the difference between a compatible hint and\n//                evidence, and it is what makes the scoring trustworthy.\n//   evidence      : words that reinforce, weighted by how widespread they are.\n//   against    : words that, when stronger than every piece of evidence,\n//                contradict the rule outright.\nconst MONTHS = ['gennaio','febbraio','marzo','aprile','maggio','giugno','luglio',\n                'agosto','settembre','ottobre','novembre','dicembre'];\n\nfunction asList(x) { return typeof x === 'string' ? JSON.parse(x) : x; }\n\nfunction decide(c, rules, presence) {\n  const out = [];\n  for (const r of rules) {\n    const need = asList(r.required), evid = asList(r.evidence);\n    const against = asList(r.against || []);\n    if (!need.every(g => g.some(p => (c[p] || 0) >= presence))) continue;\n    const found = evid.filter(p => (c[p] || 0) >= presence);\n    if (!found.length) continue;\n    const contra = Math.max(0, ...against.map(p => c[p] || 0));\n    if (contra > Math.max(...found.map(p => c[p]))) continue;\n    // a word present in 4% of photos is a hint, one in 40% is a fact: counting\n    // them equally let three weak hints beat two overwhelming ones\n    const score = found.reduce((s, p) =>\n      s + Math.min(c[p], 0.4) + 0.25 * Math.min(1, c[p] / 0.12), 0);\n    out.push({ score, tipo: r.tipo, found });\n  }\n  out.sort((a, b) => b.score - a.score);\n  if (!out.length) return { tipo: null, found: [], margin: 0 };\n  const m = out.length === 1 ? out[0].score : out[0].score - out[1].score;\n  return { tipo: out[0].tipo, found: out[0].found, margin: m };\n}\n\nconst result = [];\nfor (const it of items) {\n  const d = it.json;\n  const ids = asList(d.ids);\n  if (!ids || !ids.length) continue;\n  const raw = asList(d.concetti) || {};\n  const c = {}; for (const k in raw) c[k] = Number(raw[k]);\n  const rules = asList(d.regole) || [];\n  const presence = Number(d.presenza), margin = Number(d.margin);\n\n  const { tipo, found, margin: got } = decide(c, rules, presence);\n  const from = new Date(d.dal), to = new Date(d.al);\n  const month = MONTHS[from.getMonth()], year = from.getFullYear();\n  let period;\n  if (d.dal === d.al) period = from.getDate() + ' ' + month + ' ' + year;\n  else if (from.getMonth() === to.getMonth())\n    period = from.getDate() + '-' + to.getDate() + ' ' + month + ' ' + year;\n  else period = from.getDate() + ' ' + month + ' - ' + to.getDate() + ' ' +\n                MONTHS[to.getMonth()] + ' ' + year;\n\n  const where = d.citta ? (' a ' + d.citta) : '';\n  // no name when the evidence is thin: a wrong title is worse than none\n  const name = (tipo && got >= margin)\n      ? (tipo + where + ', ' + month + ' ' + year)\n      : ((d.citta ? d.citta + ', ' : '') + period);\n\n  result.push({ json: {\n    azione: d.album_da_estendere ? 'estendi' : 'crea',\n    album_id: d.album_da_estendere || null,\n    immich_url: d.immich_url,\n    nome: name, ids, dal: d.dal, al: d.al, quante: ids.length,\n    riconosciuto: (tipo && got >= margin) ? tipo : null,\n    evidence: found.map(p => p + ' ' + Math.round(c[p] * 100) + '%').join(', '),\n    distacco: Math.round(got * 100) / 100,\n  }});\n}\nreturn result;\n"
+        },
+        "id": "e3",
+        "name": "Recognise and name",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -220,
+          0
+        ],
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.azione }}",
+                "rightValue": "crea",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        },
+        "id": "e4",
+        "name": "New album or extend one?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          0,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json.immich_url }}/api/albums",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ albumName: $json.nome, assetIds: $json.ids }) }}",
+          "options": {}
+        },
+        "id": "e5",
+        "name": "Create album",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          -110
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": true,
+        "maxTries": 2
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "={{ $json.immich_url }}/api/albums/{{ $json.album_id }}/assets",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ ids: $json.ids }) }}",
+          "options": {}
+        },
+        "id": "e6",
+        "name": "Extend existing album",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          110
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": true,
+        "maxTries": 2
+      },
+      {
+        "parameters": {
+          "jsCode": "// Carry the album id forward together with the dates, so the run can be recorded.\nconst out = [];\nconst before = $('Recognise and name').all();\nfor (let i = 0; i < items.length; i++) {\n  const r = items[i].json;\n  const o = before[i] ? before[i].json : {};\n  const id = r.id || o.album_id;\n  if (!id) continue;\n  out.push({ json: { album_id: id, dal: o.dal, al: o.al, nome: o.nome,\n                     quante: o.quante, riconosciuto: o.riconosciuto, evidence: o.evidence } });\n}\nreturn out;"
+        },
+        "id": "e7",
+        "name": "Collect outcome",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          0
+        ],
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO curator_albums (album_id, dal, al, aggiornato)\nVALUES ('{{ $json.album_id }}', '{{ $json.dal }}', '{{ $json.al }}', now())\nON CONFLICT (album_id) DO UPDATE SET dal = LEAST(curator_albums.dal, EXCLUDED.dal),\n  al = GREATEST(curator_albums.al, EXCLUDED.al), aggiornato = now();",
+          "options": {}
+        },
+        "id": "e8",
+        "name": "Record what was done",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          660,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "chatId": "SET_YOUR_CHAT_ID",
+          "text": "=[Immich curator] albums: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nNo album was left half-written.",
+          "additionalFields": {}
+        },
+        "id": "tg",
+        "name": "Alert ONLY on failure",
+        "type": "n8n-nodes-base.telegram",
+        "typeVersion": 1.2,
+        "position": [
+          660,
+          220
+        ],
+        "credentials": {
+          "telegramApi": {
+            "id": "REPLACE_TELEGRAM",
+            "name": "Telegram"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Every night": {
+        "main": [
+          [
+            {
+              "node": "What the periods are made of",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "What the periods are made of": {
+        "main": [
+          [
+            {
+              "node": "Recognise and name",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Recognise and name": {
+        "main": [
+          [
+            {
+              "node": "New album or extend one?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "New album or extend one?": {
+        "main": [
+          [
+            {
+              "node": "Create album",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Extend existing album",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create album": {
+        "main": [
+          [
+            {
+              "node": "Collect outcome",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extend existing album": {
+        "main": [
+          [
+            {
+              "node": "Collect outcome",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Collect outcome": {
+        "main": [
+          [
+            {
+              "node": "Record what was done",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record what was done": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "saveDataErrorExecution": "all",
+      "saveDataSuccessExecution": "all"
+    }
+  }
+]

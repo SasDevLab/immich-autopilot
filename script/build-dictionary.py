@@ -9,8 +9,8 @@ Il modello gira nel container di Immich, in locale: nessun dato esce dalla
 macchina, ne le foto ne le parole.
 
 Uso:
-    popola-dizionario.py [dizionario]   (predefinito: dizionari/it.txt)
-    popola-dizionario.py --ricalcola    ricalcola anche le parole gia presenti
+    build-dictionary.py [dizionario]   (predefinito: dictionaries/it.txt)
+    build-dictionary.py --ricalcola    ricalcola anche le parole gia presenti
 """
 import json
 import os
@@ -56,7 +56,7 @@ def main():
     ricalcola = "--ricalcola" in sys.argv
     percorso = args[0] if args else os.path.join(QUI, "dizionari", "it.txt")
 
-    modello = psql("SELECT valore FROM curatore_config WHERE chiave='modello_clip';").strip()
+    modello = psql("SELECT valore FROM curator_config WHERE chiave='clip_model';").strip()
     if not modello:
         print("  Tabelle mancanti: lancia prima sql/01-schema.sql")
         sys.exit(1)
@@ -67,7 +67,7 @@ def main():
                    "FROM system_metadata WHERE key='system-config';").strip()
     if attuale and attuale != modello:
         print("  ATTENZIONE: Immich usa '%s', la configurazione dice '%s'." % (attuale, modello))
-        print("  Allinea 'modello_clip' in curatore_config, poi rilancia con --ricalcola.")
+        print("  Allinea 'clip_model' in curator_config, poi rilancia con --ricalcola.")
         sys.exit(1)
 
     parole = []
@@ -78,10 +78,10 @@ def main():
     parole = sorted(set(parole))
 
     if ricalcola:
-        psql("DELETE FROM curatore_dizionario;")
+        psql("DELETE FROM curator_dictionary;")
         gia = set()
     else:
-        gia = set(psql("SELECT parola FROM curatore_dizionario WHERE modello = '%s';" % modello).split())
+        gia = set(psql("SELECT parola FROM curator_dictionary WHERE modello = '%s';" % modello).split())
 
     nuove = [p for p in parole if p not in gia]
     print("  dizionario %s: %d parole, %d da calcolare"
@@ -101,16 +101,16 @@ def main():
                                               ",".join("%.6f" % x for x in v), modello))
         fatte += 1
         if len(blocco) >= 40:
-            psql("INSERT INTO curatore_dizionario (parola, vettore, modello) VALUES "
+            psql("INSERT INTO curator_dictionary (parola, vettore, modello) VALUES "
                  + ",".join(blocco) + " ON CONFLICT (parola) DO NOTHING;")
             blocco = []
             print("    ...%d/%d" % (fatte, len(nuove)))
             sys.stdout.flush()
     if blocco:
-        psql("INSERT INTO curatore_dizionario (parola, vettore, modello) VALUES "
+        psql("INSERT INTO curator_dictionary (parola, vettore, modello) VALUES "
              + ",".join(blocco) + " ON CONFLICT (parola) DO NOTHING;")
 
-    print("  parole nel dizionario: %s" % psql("SELECT count(*) FROM curatore_dizionario;").strip())
+    print("  parole nel dizionario: %s" % psql("SELECT count(*) FROM curator_dictionary;").strip())
 
 
 if __name__ == "__main__":

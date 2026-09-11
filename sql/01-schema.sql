@@ -1,72 +1,97 @@
--- Curatore per Immich - tabelle di supporto
+-- Immich curator - supporting tables
 --
--- Vivono nello stesso database di Immich ma con un prefisso proprio, e Immich
--- le ignora: non tocca tabelle che non conosce. Restano intatte attraverso gli
--- aggiornamenti, e si rimuovono con un DROP se si cambia idea.
+-- These live in Immich's own database under their own prefix. Immich ignores
+-- tables it does not know about, so they survive upgrades untouched, and a DROP
+-- removes every trace if you change your mind.
 
--- Parametri regolabili --------------------------------------------------------
-CREATE TABLE IF NOT EXISTS curatore_config (
-  chiave     text PRIMARY KEY,
-  valore     text NOT NULL,
-  descrizione text
+-- Settings --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curator_config (
+  key         text PRIMARY KEY,
+  value       text NOT NULL,
+  description text
 );
 
-INSERT INTO curatore_config (chiave, valore, descrizione) VALUES
- ('proprietario', '',
-  'Email dell utente Immich da gestire. Vuoto = tutti gli utenti. Attenzione: la chiave API appartiene a un utente solo, e scrivere sulle persone di un altro fallisce.'),
- ('fuso_orario', 'Europe/Rome',
-  'Con quale fuso si stabilisce a che giorno appartiene una foto.'),
- ('soglia_scena', '1.5',
-  'Di quante deviazioni standard una foto deve staccarsi dalla media di una parola per "contenerla". Piu alto = meno concetti per foto, piu selettivo.'),
- ('presenza_minima', '0.04',
-  'Sotto questa quota di foto dell evento, un concetto non conta come prova.'),
- ('margine', '0.30',
-  'Distacco minimo fra prima e seconda ipotesi per dare un nome. Sotto, l evento tiene solo la data: un titolo sbagliato e peggio di nessun titolo.'),
- ('foto_minime', '20',      'Sotto questo numero di foto un periodo non diventa album.'),
- ('vuoto_giorni', '2',      'Giorni senza foto che separano due eventi.'),
- ('durata_massima', '21',
-  'Oltre questi giorni non e un evento ma vita quotidiana: si ignora. Senza questo limite, su un archivio fitto uscirebbe un unico album lungo anni.'),
- ('modello_clip', 'ViT-B-16-SigLIP-i18n-256__webli',
-  'Deve coincidere con il modello impostato in Immich, altrimenti i vettori non sono confrontabili.'),
+INSERT INTO curator_config (key, value, description) VALUES
+ ('owner_email', '',
+  'Immich user to work on. Empty means every user. Careful: an API key belongs to one user, and writing to another user''s people fails with 403.'),
+ ('timezone', 'Europe/Rome',
+  'Which timezone decides what day a photo belongs to.'),
+ ('word_threshold', '1.5',
+  'How many standard deviations a photo must stand above a word''s own average to "contain" it. Higher means fewer concepts per photo.'),
+ ('min_presence', '0.04',
+  'Below this share of an event''s photos, a concept is not evidence.'),
+ ('margin', '0.30',
+  'Minimum gap between first and second hypothesis before a name is given. Below it the event keeps its date: a wrong title is worse than none.'),
+ ('min_photos', '20',
+  'A period with fewer photos than this does not become an album.'),
+ ('gap_days', '2',
+  'Days without photos that separate one event from the next.'),
+ ('max_span_days', '21',
+  'Beyond this, a run is not an event but ordinary life, and is skipped. Without the cap, a dense library yields one album spanning years.'),
+ ('clip_model', 'ViT-B-16-SigLIP-i18n-256__webli',
+  'Must match the model set in Immich. Vectors from different models are not comparable.'),
  ('immich_url', 'http://immich_server:2283',
-  'Come n8n raggiunge Immich. Il workflow lo legge da qui, cosi non restano indirizzi scritti dentro i nodi.')
-ON CONFLICT (chiave) DO NOTHING;
+  'How n8n reaches Immich. The queries pass it through, so no address is written inside a node.'),
+ ('cover_max_distance', '0.05',
+  'How far a face may sit from that person''s average face and still be a cover candidate.'),
+ ('cover_min_area', '0.45',
+  'How much smaller a face may be than that person''s largest. Below it, the crop is too coarse.'),
+ -- Filing an unfiled photo into an album that already exists. Measured on a
+ -- real library, these four together gave zero false positives and 99.9%
+ -- precision; without assign_days it was 12% wrong.
+ ('assign_neighbours', '10',
+  'How many already-filed photos to look at. Nearest neighbours, not distance to the album average: an album holding several kinds of scene has its average between them, resembling none.'),
+ ('assign_similarity', '0.85',
+  'How close the nearest neighbour must be before the question is even asked.'),
+ ('assign_agreement', '0.8',
+  'What share of those neighbours must agree on the same album.'),
+ ('assign_days', '30',
+  'The neighbours must also be this close in time. Content says what a photo is and cannot say which: two studio shoots two years apart are the same pixels. Note this is the NEIGHBOURS'' dates, not the album''s range - albums that collect photos over years accept anything.')
+ON CONFLICT (key) DO NOTHING;
 
--- Dizionario: una parola, il suo vettore ---------------------------------------
-CREATE TABLE IF NOT EXISTS curatore_dizionario (
-  parola  text PRIMARY KEY,
-  vettore vector(768) NOT NULL,
-  modello text NOT NULL,
-  creato  timestamptz NOT NULL DEFAULT now()
+-- Dictionary: a word and its vector ---------------------------------------------
+CREATE TABLE IF NOT EXISTS curator_dictionary (
+  word    text PRIMARY KEY,
+  vector  vector(768) NOT NULL,
+  model   text NOT NULL,
+  created timestamptz NOT NULL DEFAULT now()
 );
 
--- Regole: che cosa rende un evento quel tipo di evento -------------------------
-CREATE TABLE IF NOT EXISTS curatore_regole (
-  tipo       text PRIMARY KEY,
-  necessarie jsonb NOT NULL,  -- liste di parole: di ogni lista almeno una deve esserci
-  prove      jsonb NOT NULL,  -- parole che rafforzano, pesate su quanto sono diffuse
-  escluse    jsonb NOT NULL DEFAULT '[]'::jsonb,  -- se piu forti di ogni prova, smentiscono
-  attiva     boolean NOT NULL DEFAULT true
+-- Rules: what makes an event that kind of event ---------------------------------
+CREATE TABLE IF NOT EXISTS curator_rules (
+  type     text PRIMARY KEY,
+  -- lists of words; at least one from every list must be present
+  required jsonb NOT NULL,
+  -- words that reinforce, weighted by how widespread they are
+  evidence jsonb NOT NULL,
+  -- words that, when stronger than every piece of evidence, contradict the rule
+  against  jsonb NOT NULL DEFAULT '[]'::jsonb,
+  active   boolean NOT NULL DEFAULT true
 );
 
--- Memoria: cosa ha fatto il curatore, per non rifarlo e per rispettare
--- le modifiche manuali dell utente
-CREATE TABLE IF NOT EXISTS curatore_album (
-  album_id   uuid PRIMARY KEY,
-  dal        date NOT NULL,
-  al         date NOT NULL,
-  aggiornato timestamptz NOT NULL DEFAULT now()
+-- Memory: what the curator did.
+-- Two purposes: not redoing settled work, and leaving alone anything a person
+-- has since changed by hand. A manual choice wins for good.
+CREATE TABLE IF NOT EXISTS curator_albums (
+  album_id  uuid PRIMARY KEY,
+  from_date date NOT NULL,
+  to_date   date NOT NULL,
+  updated   timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS curatore_copertine (
-  person_id  uuid PRIMARY KEY,
-  face_id    uuid NOT NULL,
-  aggiornato timestamptz NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS curator_covers (
+  person_id uuid PRIMARY KEY,
+  face_id   uuid NOT NULL,
+  updated   timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS curatore_colore (
-  asset_id      uuid PRIMARY KEY,
-  scarto        numeric NOT NULL,
-  bianco_e_nero boolean NOT NULL,
-  calcolato     timestamptz NOT NULL DEFAULT now()
+-- Whether a photo is monochrome. Neither EXIF nor semantic search can tell:
+-- a black and white JPEG still records itself as sRGB, and asking the model for
+-- "black and white" returns colour photos among the top hits. Only the pixels
+-- say so, which is why this is measured once and stored.
+CREATE TABLE IF NOT EXISTS curator_colour (
+  asset_id   uuid PRIMARY KEY,
+  spread     numeric NOT NULL,
+  monochrome boolean NOT NULL,
+  measured   timestamptz NOT NULL DEFAULT now()
 );

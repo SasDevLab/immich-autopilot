@@ -1,16 +1,23 @@
--- Regole predefinite: cosa rende un evento quel tipo di evento.
+-- Italian rule pack: what makes an event that kind of event.
 --
--- Struttura di ogni regola:
---   necessarie : liste di parole; di OGNI lista almeno una deve essere presente.
---                E la differenza fra indizio compatibile e prova: senza una
---                chiesa non e un battesimo, per quante foto di neonati ci siano.
---   prove      : parole che rafforzano, pesate su quanto sono diffuse.
---   escluse    : parole che, se piu forti di ogni prova, smentiscono la regola.
+-- The words are Italian because they must match the Italian dictionary, and the
+-- type names are Italian because they end up in album titles. Everything else
+-- in this project is English.
 --
--- Si modificano con un UPDATE, senza toccare i workflow. Aggiungere un tipo di
--- evento significa aggiungere una riga qui e le parole nel dizionario.
+-- Each rule has three parts:
+--   required : lists of words; at least one from EVERY list must be present.
+--              This is the difference between a compatible hint and evidence.
+--              Without a church it is not a baptism, however many babies
+--              appear - and that single constraint corrected four events out of
+--              eight while this was being tuned.
+--   evidence : words that reinforce, weighted by how widespread they are.
+--   against  : words that, when stronger than every piece of evidence,
+--              contradict the rule outright.
+--
+-- Change them with an UPDATE; no workflow edit is needed. Adding an event type
+-- means adding a row here, and adding the words it names to the dictionary.
 
-INSERT INTO curatore_regole (tipo, necessarie, prove, escluse) VALUES
+INSERT INTO curator_rules (type, required, evidence, against) VALUES
 
 ('Matrimonio',
  '[["sposa","sposo","bouquet","anello"],["chiesa","altare","cerimonia","banchetto"]]',
@@ -72,4 +79,4 @@ INSERT INTO curatore_regole (tipo, necessarie, prove, escluse) VALUES
  '["gara","calcio","squadra","pallone","corsa","medaglia","palestra"]',
  '["chiesa","sposa","neonato"]')
 
-ON CONFLICT (tipo) DO NOTHING;
+ON CONFLICT (type) DO NOTHING;

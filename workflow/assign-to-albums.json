@@ -1,0 +1,156 @@
+[
+  {
+    "name": "Immich curator - file into existing albums",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "days",
+                "triggerAtHour": 5,
+                "triggerAtMinute": 0
+              }
+            ]
+          }
+        },
+        "id": "a1",
+        "name": "Every night",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -440,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "-- Unfiled photos that belong to an album which already exists.\n--\n-- Not by distance to the album's centre. An album holding a church, a dance and\n-- a cake has its average somewhere between the three, resembling none of them,\n-- and judging a photo against that point is like judging a family by its mean\n-- height. Measured on a real library it put 20% of photos belonging to no album\n-- into one anyway.\n--\n-- Instead: the nearest already-filed photos, and where THEY live. If nearly all\n-- of them sit in one album, that is the answer.\n--\n-- The decisive part is the second condition. Content says WHAT a photo is; it\n-- cannot say WHICH, because two studio shoots two years apart are the same\n-- pixels. The date can. Requiring the neighbours to be close in time as well\n-- took false positives from 12% to zero on the same library, with precision at\n-- 99.9%.\n--\n-- Applied to the album's own date range this does nothing - albums that collect\n-- photos over years accept anything. It has to be the neighbours' dates.\nWITH cfg AS (\n  SELECT\n    max(value) FILTER (WHERE key='owner_email') AS owner_email,\n    max(value) FILTER (WHERE key='timezone')    AS tz,\n    max(value) FILTER (WHERE key='immich_url')  AS immich_url,\n    max(value) FILTER (WHERE key='assign_neighbours')::int     AS k,\n    max(value) FILTER (WHERE key='assign_similarity')::numeric AS min_sim,\n    max(value) FILTER (WHERE key='assign_agreement')::numeric  AS agreement,\n    max(value) FILTER (WHERE key='assign_days')::int           AS max_days\n  FROM curator_config\n),\nfiled AS (\n  SELECT aa.\"albumId\", s.\"assetId\" aid, s.embedding,\n         (a.\"fileCreatedAt\" AT TIME ZONE (SELECT tz FROM cfg))::date d\n  FROM album_asset aa\n  JOIN album al ON al.id = aa.\"albumId\" AND al.\"deletedAt\" IS NULL\n  JOIN smart_search s ON s.\"assetId\" = aa.\"assetId\"\n  JOIN asset a ON a.id = s.\"assetId\" AND a.\"deletedAt\" IS NULL\n),\nunfiled AS (\n  SELECT s.\"assetId\" aid, s.embedding,\n         (a.\"fileCreatedAt\" AT TIME ZONE (SELECT tz FROM cfg))::date d\n  FROM smart_search s\n  JOIN asset a ON a.id = s.\"assetId\" AND a.\"deletedAt\" IS NULL\n  JOIN \"user\" u ON u.id = a.\"ownerId\"\n  WHERE ((SELECT owner_email FROM cfg) = '' OR u.email = (SELECT owner_email FROM cfg))\n    AND NOT EXISTS (SELECT 1 FROM album_asset aa WHERE aa.\"assetId\" = s.\"assetId\")\n),\nneighbours AS (\n  SELECT u.aid, n.\"albumId\", n.sim\n  FROM unfiled u\n  CROSS JOIN LATERAL (\n    SELECT f.\"albumId\", 1 - (f.embedding <=> u.embedding) sim\n    FROM filed f\n    WHERE abs(f.d - u.d) <= (SELECT max_days FROM cfg)\n    ORDER BY f.embedding <=> u.embedding\n    LIMIT (SELECT k FROM cfg)\n  ) n\n),\ntally AS (\n  SELECT aid, \"albumId\",\n         count(*)   AS votes,\n         max(sim)   AS best\n  FROM neighbours GROUP BY aid, \"albumId\"\n),\nwinner AS (\n  SELECT DISTINCT ON (t.aid) t.aid, t.\"albumId\", t.votes, t.best,\n         (SELECT count(*) FROM neighbours n WHERE n.aid = t.aid) AS total\n  FROM tally t ORDER BY t.aid, t.votes DESC, t.best DESC\n)\nSELECT w.aid AS asset_id,\n       w.\"albumId\" AS album_id,\n       al.\"albumName\" AS album_name,\n       round(w.best::numeric, 3) AS similarity,\n       w.votes, w.total,\n       (SELECT immich_url FROM cfg) AS immich_url\nFROM winner w\nJOIN album al ON al.id = w.\"albumId\"\nWHERE w.total >= (SELECT k FROM cfg)                         -- enough neighbours in the window\n  AND w.best >= (SELECT min_sim FROM cfg)                    -- and close enough\n  AND w.votes::numeric / w.total >= (SELECT agreement FROM cfg)  -- and they agree\nORDER BY al.\"albumName\", w.best DESC;\n",
+          "options": {}
+        },
+        "id": "a2",
+        "name": "Which photo belongs where",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          -220,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "={{ $json.immich_url }}/api/albums/{{ $json.album_id }}/assets",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ ids: [$json.asset_id] }) }}",
+          "options": {
+            "batching": {
+              "batch": {
+                "batchSize": 4,
+                "batchInterval": 300
+              }
+            }
+          }
+        },
+        "id": "a3",
+        "name": "Add to the album",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          0,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": true,
+        "maxTries": 2
+      },
+      {
+        "parameters": {
+          "chatId": "SET_YOUR_CHAT_ID",
+          "text": "=[Immich curator] filing: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}",
+          "additionalFields": {}
+        },
+        "id": "tg",
+        "name": "Alert ONLY on failure",
+        "type": "n8n-nodes-base.telegram",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          200
+        ],
+        "credentials": {
+          "telegramApi": {
+            "id": "REPLACE_TELEGRAM",
+            "name": "Telegram"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Every night": {
+        "main": [
+          [
+            {
+              "node": "Which photo belongs where",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Which photo belongs where": {
+        "main": [
+          [
+            {
+              "node": "Add to the album",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Add to the album": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "saveDataErrorExecution": "all",
+      "saveDataSuccessExecution": "all"
+    }
+  }
+]

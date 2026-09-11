@@ -1,0 +1,280 @@
+[
+  {
+    "name": "Immich curator - person covers",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "days",
+                "triggerAtHour": 4,
+                "triggerAtMinute": 45
+              }
+            ]
+          }
+        },
+        "id": "p1",
+        "name": "Every night",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -660,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "-- Which face should be a person's cover photo.\n--\n-- Immich picks whichever face crop scored highest at detection, which has\n-- nothing to do with whether the picture is any good: galleries fill up with\n-- ears, half faces and cut-off eyes.\n--\n-- The criteria below are preferences in order, not filters. With hard filters,\n-- people who have exactly one detected face come out with no candidate at all -\n-- and in a real library that is a sizeable minority.\n--\n-- Returns one row per person that needs changing. It writes nothing: the change\n-- goes through Immich's API, which is the only thing that also regenerates the\n-- cropped thumbnail on disk. Setting person.\"faceAssetId\" directly moves the\n-- pointer and leaves the old image in place.\nWITH cfg AS (\n  SELECT\n    max(valore) FILTER (WHERE chiave='owner_email') AS owner_email,\n    max(valore) FILTER (WHERE chiave='immich_url')   AS immich_url,\n    max(valore) FILTER (WHERE chiave='cover_max_distance')::numeric AS max_dist,\n    max(valore) FILTER (WHERE chiave='cover_min_area')::numeric AS min_area\n  FROM curator_config\n),\neleggibili AS (\n  -- people whose cover still matches what this job last set: anything else was\n  -- chosen by hand, and a manual choice wins for good.\n  -- Config is read with scalar subqueries rather than joining cfg: a comma-join\n  -- in the middle of a join chain attaches the next LEFT JOIN to the wrong\n  -- table, which is a quiet way to get wrong answers.\n  SELECT p.id\n  FROM person p\n  JOIN \"user\" u ON u.id = p.\"ownerId\"\n  LEFT JOIN curator_covers cc ON cc.person_id = p.id\n  WHERE ((SELECT owner_email FROM cfg) = '' OR u.email = (SELECT owner_email FROM cfg))\n    AND (cc.person_id IS NULL OR p.\"faceAssetId\" IS NOT DISTINCT FROM cc.face_id)\n),\ncentro AS (\n  -- the \"average face\" of each person: the most typical face is usually the\n  -- frontal, well-lit one, because odd angles sit far from the average\n  SELECT af.\"personId\" pid, avg(fs.embedding) media\n  FROM asset_face af\n  JOIN face_search fs ON fs.\"faceId\" = af.id\n  WHERE af.\"personId\" IN (SELECT id FROM eleggibili) AND af.\"deletedAt\" IS NULL\n  GROUP BY af.\"personId\"\n),\nvolti AS (\n  SELECT af.\"personId\" pid, af.id fid, af.\"assetId\" aid,\n         1 - (fs.embedding <=> c.media) AS tipicita,\n         (af.\"boundingBoxX2\"-af.\"boundingBoxX1\")*(af.\"boundingBoxY2\"-af.\"boundingBoxY1\") AS area,\n         -- a box touching the frame means the face is cut off\n         (af.\"boundingBoxX1\" <= 0.02*af.\"imageWidth\" OR af.\"boundingBoxY1\" <= 0.02*af.\"imageHeight\"\n          OR af.\"boundingBoxX2\" >= 0.98*af.\"imageWidth\" OR af.\"boundingBoxY2\" >= 0.98*af.\"imageHeight\") AS tagliato,\n         -- another face inside the crop means the cover shows two people\n         (SELECT count(*) FROM asset_face o\n           WHERE o.\"assetId\" = af.\"assetId\" AND o.id <> af.id AND o.\"deletedAt\" IS NULL\n             AND o.\"boundingBoxX1\" < af.\"boundingBoxX2\" + 0.4*(af.\"boundingBoxX2\"-af.\"boundingBoxX1\")\n             AND o.\"boundingBoxX2\" > af.\"boundingBoxX1\" - 0.4*(af.\"boundingBoxX2\"-af.\"boundingBoxX1\")\n             AND o.\"boundingBoxY1\" < af.\"boundingBoxY2\" + 0.4*(af.\"boundingBoxY2\"-af.\"boundingBoxY1\")\n             AND o.\"boundingBoxY2\" > af.\"boundingBoxY1\" - 0.4*(af.\"boundingBoxY2\"-af.\"boundingBoxY1\")) AS vicini,\n         a.\"fileCreatedAt\" AS quando,\n         coalesce(col.bianco_e_nero, false) AS bianco_e_nero\n  FROM asset_face af\n  JOIN face_search fs ON fs.\"faceId\" = af.id\n  JOIN centro c ON c.pid = af.\"personId\"\n  JOIN asset a ON a.id = af.\"assetId\" AND a.\"deletedAt\" IS NULL\n  JOIN asset_file f ON f.\"assetId\" = af.\"assetId\" AND f.type = 'preview'\n  LEFT JOIN curator_colour col ON col.asset_id = af.\"assetId\"\n  WHERE af.\"deletedAt\" IS NULL AND af.\"isVisible\" = true\n),\nmassimi AS (\n  SELECT pid, max(tipicita) tip_max, max(area) area_max FROM volti GROUP BY pid\n),\nscelta AS (\n  SELECT DISTINCT ON (v.pid) v.pid, v.fid, v.aid\n  FROM volti v JOIN massimi m ON m.pid = v.pid\n  ORDER BY v.pid,\n           -- colour first: monochrome is demoted, never excluded, so a person\n           -- whose only decent shots are black and white keeps one\n           v.bianco_e_nero,\n           (CASE WHEN v.tagliato THEN 1 ELSE 0 END),\n           (CASE WHEN v.tipicita >= m.tip_max - (SELECT max_dist FROM cfg)\n                  AND v.area >= (SELECT min_area FROM cfg) * m.area_max THEN 0 ELSE 1 END),\n           (CASE WHEN v.vicini = 0 THEN 0 ELSE 1 END),\n           v.quando DESC,\n           v.area DESC\n)\nSELECT s.pid AS person_id,\n       s.fid AS face_id,\n       s.aid AS asset_id,\n       coalesce(nullif(p.name, ''), '(senza nome)') AS nome,\n       (SELECT immich_url FROM cfg) AS immich_url\nFROM scelta s\nJOIN person p ON p.id = s.pid\nWHERE p.\"faceAssetId\" IS DISTINCT FROM s.fid;\n",
+          "options": {}
+        },
+        "id": "p2",
+        "name": "Who needs a better cover",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          -440,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "={{ $json.immich_url }}/api/people/{{ $json.person_id }}",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ featureFaceAssetId: null }) }}",
+          "options": {
+            "batching": {
+              "batch": {
+                "batchSize": 4,
+                "batchInterval": 400
+              }
+            }
+          }
+        },
+        "id": "p3",
+        "name": "Clear current cover",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -220,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "method": "PUT",
+          "url": "={{ $('Who needs a better cover').item.json.immich_url }}/api/people/{{ $('Who needs a better cover').item.json.person_id }}",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ featureFaceAssetId: $('Who needs a better cover').item.json.asset_id }) }}",
+          "options": {
+            "batching": {
+              "batch": {
+                "batchSize": 4,
+                "batchInterval": 400
+              }
+            }
+          }
+        },
+        "id": "p4",
+        "name": "Set the chosen face",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          0,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "REPLACE_API",
+            "name": "Immich API key"
+          }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": true,
+        "maxTries": 2
+      },
+      {
+        "parameters": {
+          "jsCode": "// Pass the person id on, so the run can be recorded.\nconst out = [];\nconst src = $('Who needs a better cover').all();\nfor (let i = 0; i < items.length; i++) {\n  const o = src[i] ? src[i].json : null;\n  if (o) out.push({ json: { person_id: o.person_id, nome: o.nome } });\n}\nreturn out;"
+        },
+        "id": "p5",
+        "name": "Collect outcome",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          220,
+          0
+        ],
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO curator_covers (person_id, face_id, aggiornato)\nSELECT id, \"faceAssetId\", now() FROM person WHERE id = '{{ $json.person_id }}'\nON CONFLICT (person_id) DO UPDATE SET face_id = EXCLUDED.face_id, aggiornato = now();",
+          "options": {}
+        },
+        "id": "p6",
+        "name": "Record what was done",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.4,
+        "position": [
+          440,
+          0
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "REPLACE_POSTGRES",
+            "name": "Immich Postgres"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "chatId": "SET_YOUR_CHAT_ID",
+          "text": "=[Immich curator] covers: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nCovers are unchanged.",
+          "additionalFields": {}
+        },
+        "id": "tg",
+        "name": "Alert ONLY on failure",
+        "type": "n8n-nodes-base.telegram",
+        "typeVersion": 1.2,
+        "position": [
+          440,
+          220
+        ],
+        "credentials": {
+          "telegramApi": {
+            "id": "REPLACE_TELEGRAM",
+            "name": "Telegram"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Every night": {
+        "main": [
+          [
+            {
+              "node": "Who needs a better cover",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Who needs a better cover": {
+        "main": [
+          [
+            {
+              "node": "Clear current cover",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clear current cover": {
+        "main": [
+          [
+            {
+              "node": "Set the chosen face",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set the chosen face": {
+        "main": [
+          [
+            {
+              "node": "Collect outcome",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Collect outcome": {
+        "main": [
+          [
+            {
+              "node": "Record what was done",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record what was done": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Alert ONLY on failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "saveDataErrorExecution": "all",
+      "saveDataSuccessExecution": "all"
+    }
+  }
+]

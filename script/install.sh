@@ -53,7 +53,7 @@ ok "foto indicizzate: $FOTO"
 
 echo
 echo "=== creazione delle tabelle ==="
-for f in "$QUI"/sql/01-schema.sql "$QUI"/sql/02-regole-it.sql; do
+for f in "$QUI"/sql/01-schema.sql "$QUI"/sql/02-rules-it.sql; do
   docker cp "$f" "$DB:/tmp/$(basename "$f")" >/dev/null
   docker exec "$DB" psql -U "$UTENTE" -d "$NOME" -q -f "/tmp/$(basename "$f")" \
     || errore "fallito $(basename "$f")"
@@ -61,12 +61,12 @@ for f in "$QUI"/sql/01-schema.sql "$QUI"/sql/02-regole-it.sql; do
 done
 
 docker exec "$DB" psql -U "$UTENTE" -d "$NOME" -c \
-  "UPDATE curatore_config SET valore='$M' WHERE chiave='modello_clip';" >/dev/null
+  "UPDATE curator_config SET valore='$M' WHERE chiave='clip_model';" >/dev/null
 ok "modello allineato a quello di Immich"
 
 echo
 echo "=== dizionario ==="
-python3 "$QUI/script/popola-dizionario.py" "${1:-$QUI/dizionari/it.txt}" || exit 1
+python3 "$QUI/script/build-dictionary.py" "${1:-$QUI/dictionaries/it.txt}" || exit 1
 
 echo
 echo "=== fatto. Restano tre cose da fare a mano in n8n ==="
