@@ -1,11 +1,11 @@
 -- What each not-yet-filed period of photos is made of.
 --
--- Nothing is hard-coded here: every threshold comes from curator_config, so
+-- Nothing is hard-coded here: every threshold comes from autopilot_config, so
 -- tuning happens with an UPDATE and no workflow edit.
 --
 -- The STATISTICS are computed over the whole library, because how close a word
 -- sits to everything is a property of the word, not of the new photos. The
--- EVENTS are formed only from photos outside every album: that way the curator
+-- EVENTS are formed only from photos outside every album: that way the autopilot
 -- cannot duplicate anything, and never touches what a person filed by hand.
 WITH cfg AS (
   SELECT
@@ -16,12 +16,12 @@ WITH cfg AS (
     max(value) FILTER (WHERE key='min_photos')::int         AS min_photos,
     max(value) FILTER (WHERE key='gap_days')::int           AS gap_days,
     max(value) FILTER (WHERE key='max_span_days')::int      AS max_span
-  FROM curator_config
+  FROM autopilot_config
 ),
 sim AS (
   SELECT s."assetId" aid, d.word, 1 - (s.embedding <=> d.vector) v
   FROM smart_search s
-  CROSS JOIN curator_dictionary d
+  CROSS JOIN autopilot_dictionary d
   JOIN asset a ON a.id = s."assetId" AND a."deletedAt" IS NULL
 ),
 stat AS (SELECT word, avg(v) m, stddev_pop(v) sd FROM sim GROUP BY word),
@@ -72,15 +72,15 @@ SELECT min(ev.g)::text AS from_date,
        json_agg(DISTINCT ev.aid) AS ids,
        -- an album already created that borders this period: extend it rather
        -- than start a second one, so a trip spanning nights stays whole
-       (SELECT ca.album_id FROM curator_albums ca
+       (SELECT ca.album_id FROM autopilot_albums ca
          WHERE ca.to_date >= min(ev.g) - 2 AND ca.from_date <= max(ev.g) + 2
          ORDER BY ca.to_date DESC LIMIT 1) AS album_to_extend,
        (SELECT json_agg(json_build_object('type', r.type, 'required', r.required,
                                           'evidence', r.evidence, 'against', r.against))
-          FROM curator_rules r WHERE r.active) AS rules,
-       (SELECT max(value) FROM curator_config WHERE key='margin')::numeric AS margin,
-       (SELECT max(value) FROM curator_config WHERE key='min_presence')::numeric AS min_presence,
-       (SELECT max(value) FROM curator_config WHERE key='immich_url') AS immich_url
+          FROM autopilot_rules r WHERE r.active) AS rules,
+       (SELECT max(value) FROM autopilot_config WHERE key='margin')::numeric AS margin,
+       (SELECT max(value) FROM autopilot_config WHERE key='min_presence')::numeric AS min_presence,
+       (SELECT max(value) FROM autopilot_config WHERE key='immich_url') AS immich_url
 FROM ev JOIN sizes ON sizes.island = ev.island
 GROUP BY ev.island
 HAVING max(sizes.n) >= (SELECT min_photos FROM cfg)

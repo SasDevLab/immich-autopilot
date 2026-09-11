@@ -26,7 +26,7 @@ WITH cfg AS (
     max(value) FILTER (WHERE key='assign_similarity')::numeric AS min_sim,
     max(value) FILTER (WHERE key='assign_agreement')::numeric  AS agreement,
     max(value) FILTER (WHERE key='assign_days')::int           AS max_days
-  FROM curator_config
+  FROM autopilot_config
 ),
 filed AS (
   SELECT aa."albumId", s."assetId" aid, s.embedding,

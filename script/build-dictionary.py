@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Calcola il vettore di ogni parola del dizionario e lo salva nel database.
+"""Calcola il vector di ogni word del dizionario e lo salva nel database.
 
-Da lanciare una volta all installazione, e ogni volta che si aggiungono parole
-o si cambia il modello CLIP di Immich (i vettori del modello vecchio non sono
-confrontabili con quelli del nuovo: vanno ricalcolati tutti).
+Da lanciare una volta all installazione, e ogni volta che si aggiungono words
+o si cambia il model CLIP di Immich (i vectors del model vecchio non sono
+confrontabili con quelli del nuovo: vanno rebuildti tutti).
 
-Il modello gira nel container di Immich, in locale: nessun dato esce dalla
-macchina, ne le foto ne le parole.
+Il model gira nel container di Immich, in local_file: nessun dato esce dalla
+macchina, ne le foto ne le words.
 
 Uso:
     build-dictionary.py [dizionario]   (predefinito: dictionaries/it.txt)
-    build-dictionary.py --ricalcola    ricalcola anche le parole gia presenti
+    build-dictionary.py --rebuild    rebuild anche le words already presenti
 """
 import json
 import os
@@ -26,11 +26,11 @@ DB_NOME = os.environ.get("IMMICH_DB_NAME", "immich")
 
 
 def psql(sql, silenzioso=False):
-    open("/tmp/curatore.sql", "w").write(sql)
-    subprocess.run(["docker", "cp", "/tmp/curatore.sql", f"{CONTAINER_DB}:/tmp/curatore.sql"],
+    open("/tmp/autopilota.sql", "w").write(sql)
+    subprocess.run(["docker", "cp", "/tmp/autopilota.sql", f"{CONTAINER_DB}:/tmp/autopilota.sql"],
                    capture_output=True)
     r = subprocess.run(["docker", "exec", CONTAINER_DB, "psql", "-U", DB_UTENTE, "-d", DB_NOME,
-                        "-A", "-t", "-q", "-f", "/tmp/curatore.sql"],
+                        "-A", "-t", "-q", "-f", "/tmp/autopilota.sql"],
                        capture_output=True, text=True)
     if r.returncode != 0 and not silenzioso:
         print("  errore SQL:", r.stderr.strip()[:300])
@@ -38,12 +38,12 @@ def psql(sql, silenzioso=False):
     return r.stdout
 
 
-def vettore(frase, modello):
+def vector(phrase, model):
     o = subprocess.run(
         ["docker", "exec", CONTAINER_SERVER, "curl", "-s", "-m", "60", "-X", "POST",
          f"{ML}/predict",
-         "-F", 'entries={"clip":{"textual":{"modelName":"%s"}}}' % modello,
-         "-F", "text=%s" % frase],
+         "-F", 'entries={"clip":{"textual":{"modelName":"%s"}}}' % model,
+         "-F", "text=%s" % phrase],
         capture_output=True, text=True).stdout
     try:
         return json.loads(json.loads(o)["clip"])
@@ -53,64 +53,64 @@ def vettore(frase, modello):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    ricalcola = "--ricalcola" in sys.argv
-    percorso = args[0] if args else os.path.join(QUI, "dizionari", "it.txt")
+    rebuild = "--rebuild" in sys.argv
+    path = args[0] if args else os.path.join(QUI, "dictionaries", "it.txt")
 
-    modello = psql("SELECT valore FROM curator_config WHERE chiave='clip_model';").strip()
-    if not modello:
+    model = psql("SELECT value FROM autopilot_config WHERE key='clip_model';").strip()
+    if not model:
         print("  Tabelle mancanti: lancia prima sql/01-schema.sql")
         sys.exit(1)
 
-    # il modello del dizionario deve coincidere con quello di Immich, altrimenti
-    # i vettori appartengono a spazi diversi e i confronti non significano nulla
+    # il model del dizionario deve coincidere con quello di Immich, altrimenti
+    # i vectors appartengono a spazi diversi e i confronti non significano nulla
     attuale = psql("SELECT value #>> '{machineLearning,clip,modelName}' "
                    "FROM system_metadata WHERE key='system-config';").strip()
-    if attuale and attuale != modello:
-        print("  ATTENZIONE: Immich usa '%s', la configurazione dice '%s'." % (attuale, modello))
-        print("  Allinea 'clip_model' in curator_config, poi rilancia con --ricalcola.")
+    if attuale and attuale != model:
+        print("  ATTENZIONE: Immich usa '%s', la configurazione dice '%s'." % (attuale, model))
+        print("  Allinea 'clip_model' in autopilot_config, poi rilancia con --rebuild.")
         sys.exit(1)
 
-    parole = []
-    for riga in open(percorso, encoding="utf-8"):
+    words = []
+    for riga in open(path, encoding="utf-8"):
         riga = riga.strip()
         if riga and not riga.startswith("#"):
-            parole.extend(riga.split())
-    parole = sorted(set(parole))
+            words.extend(riga.split())
+    words = sorted(set(words))
 
-    if ricalcola:
-        psql("DELETE FROM curator_dictionary;")
-        gia = set()
+    if rebuild:
+        psql("DELETE FROM autopilot_dictionary;")
+        already = set()
     else:
-        gia = set(psql("SELECT parola FROM curator_dictionary WHERE modello = '%s';" % modello).split())
+        already = set(psql("SELECT word FROM autopilot_dictionary WHERE model = '%s';" % model).split())
 
-    nuove = [p for p in parole if p not in gia]
-    print("  dizionario %s: %d parole, %d da calcolare"
-          % (os.path.basename(percorso), len(parole), len(nuove)))
-    if not nuove:
+    new_words = [p for p in words if p not in already]
+    print("  dizionario %s: %d words, %d da calcolare"
+          % (os.path.basename(path), len(words), len(new_words)))
+    if not new_words:
         return
 
-    fatte, blocco = 0, []
-    for p in nuove:
-        # "una foto di X" funziona meglio della parola nuda: il modello e stato
+    done, batch = 0, []
+    for p in new_words:
+        # "una foto di X" funziona meglio della word nuda: il model e stato
         # addestrato su descrizioni di immagini, non su elenchi di vocaboli
-        v = vettore("una foto di " + p, modello)
+        v = vector("una foto di " + p, model)
         if v is None:
             print("    non riuscita:", p)
             continue
-        blocco.append("('%s','[%s]','%s')" % (p.replace("'", "''"),
-                                              ",".join("%.6f" % x for x in v), modello))
-        fatte += 1
-        if len(blocco) >= 40:
-            psql("INSERT INTO curator_dictionary (parola, vettore, modello) VALUES "
-                 + ",".join(blocco) + " ON CONFLICT (parola) DO NOTHING;")
-            blocco = []
-            print("    ...%d/%d" % (fatte, len(nuove)))
+        batch.append("('%s','[%s]','%s')" % (p.replace("'", "''"),
+                                              ",".join("%.6f" % x for x in v), model))
+        done += 1
+        if len(batch) >= 40:
+            psql("INSERT INTO autopilot_dictionary (word, vector, model) VALUES "
+                 + ",".join(batch) + " ON CONFLICT (word) DO NOTHING;")
+            batch = []
+            print("    ...%d/%d" % (done, len(new_words)))
             sys.stdout.flush()
-    if blocco:
-        psql("INSERT INTO curator_dictionary (parola, vettore, modello) VALUES "
-             + ",".join(blocco) + " ON CONFLICT (parola) DO NOTHING;")
+    if batch:
+        psql("INSERT INTO autopilot_dictionary (word, vector, model) VALUES "
+             + ",".join(batch) + " ON CONFLICT (word) DO NOTHING;")
 
-    print("  parole nel dizionario: %s" % psql("SELECT count(*) FROM curator_dictionary;").strip())
+    print("  words nel dizionario: %s" % psql("SELECT count(*) FROM autopilot_dictionary;").strip())
 
 
 if __name__ == "__main__":

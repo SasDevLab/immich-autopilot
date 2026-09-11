@@ -72,25 +72,25 @@ def embed(text, model):
 
 
 def main():
-    def arg(nome, pred):
-        return sys.argv[sys.argv.index(nome) + 1] if nome in sys.argv else pred
+    def arg(name, pred):
+        return sys.argv[sys.argv.index(name) + 1] if nome in sys.argv else pred
 
-    lingua = arg("--lang", "it")
-    candidati = int(arg("--candidates", "1200"))
-    tenere = int(arg("--keep", "400"))
-    campione = int(arg("--sample", "400"))
-    locale = arg("--file", "")
+    language = arg("--lang", "it")
+    candidates = int(arg("--candidates", "1200"))
+    keep = int(arg("--keep", "400"))
+    sample = int(arg("--sample", "400"))
+    local_file = arg("--file", "")
 
-    modello = psql("SELECT valore FROM curator_config WHERE chiave='clip_model';").strip()
-    if not modello:
+    model = psql("SELECT value FROM autopilot_config WHERE key='clip_model';").strip()
+    if not model:
         print("  Tables missing: run sql/01-schema.sql first"); sys.exit(1)
 
     # --- candidate words ------------------------------------------------------
-    if locale:
-        parole = [w.strip() for w in open(locale, encoding="utf-8") if w.strip()]
-        print("  %d words from %s" % (len(parole), locale))
+    if local_file:
+        words = [w.strip() for w in open(local_file, encoding="utf-8") if w.strip()]
+        print("  %d words from %s" % (len(words), local_file))
     else:
-        url = FONTE % (lingua, lingua)
+        url = FONTE % (language, language)
         print("  downloading %s ..." % url)
         r = subprocess.run(["docker", "exec", SERVER, "curl", "-s", "-m", "60", url],
                            capture_output=True, text=True)
@@ -98,68 +98,68 @@ def main():
         if len(righe) < 1000:
             print("  list not reachable (%d lines). Use --file with a local one." % len(righe))
             sys.exit(1)
-        parole = [w for w in righe[SALTA_INIZIALI:]
+        words = [w for w in righe[SALTA_INIZIALI:]
                   if len(w) >= LUNGHEZZA_MINIMA and w.isalpha()]
-        print("  %d words in the list, %d usable" % (len(righe), len(parole)))
-    parole = parole[:candidati]
+        print("  %d words in the list, %d usable" % (len(righe), len(words)))
+    words = words[:candidates]
 
     # --- a sample of real photos to measure against ---------------------------
     righe = psql("SELECT s.embedding::text FROM smart_search s "
                  "JOIN asset a ON a.id = s.\"assetId\" AND a.\"deletedAt\" IS NULL "
-                 "ORDER BY random() LIMIT %d;" % campione)
-    foto = []
+                 "ORDER BY random() LIMIT %d;" % sample)
+    photos = []
     for l in righe.splitlines():
         if l.startswith("["):
             foto.append([float(x) for x in l.strip("[]").split(",")])
-    if len(foto) < 50:
-        print("  too few indexed photos (%d): run Smart Search first" % len(foto)); sys.exit(1)
-    print("  measuring against %d photos" % len(foto))
+    if len(photos) < 50:
+        print("  too few indexed photos (%d): run Smart Search first" % len(photos)); sys.exit(1)
+    print("  measuring against %d photos" % len(photos))
 
     # normalise once, so a dot product is a cosine similarity
-    def norma(v):
+    def unit(v):
         n = sum(x * x for x in v) ** 0.5
         return [x / n for x in v] if n else v
-    foto = [norma(v) for v in foto]
+    photos = [unit(v) for v in foto]
 
-    frase = MODELLO_FRASE.get(lingua, "%s")
-    misurate = []
-    for i, w in enumerate(parole, 1):
-        v = embed(frase % w, modello)
+    phrase = MODELLO_FRASE.get(language, "%s")
+    measured_words = []
+    for i, w in enumerate(words, 1):
+        v = embed(phrase % w, model)
         if v is None:
             continue
-        v = norma(v)
+        v = unit(v)
         sim = [sum(a * b for a, b in zip(v, f)) for f in foto]
-        media = sum(sim) / len(sim)
+        mean = sum(sim) / len(sim)
         # spread is what matters: a word close to everything equally describes
         # nothing, however high its average similarity
-        scarto = (sum((s - media) ** 2 for s in sim) / len(sim)) ** 0.5
-        misurate.append((scarto, w, v))
+        spread = (sum((s - mean) ** 2 for s in sim) / len(sim)) ** 0.5
+        measured_words.append((spread, w, v))
         if i % 100 == 0:
-            print("    ...%d/%d" % (i, len(parole))); sys.stdout.flush()
+            print("    ...%d/%d" % (i, len(words))); sys.stdout.flush()
 
-    misurate.sort(reverse=True, key=lambda x: x[0])
-    scelte = misurate[:tenere]
-    print("  keeping the %d most discriminating" % len(scelte))
-    print("  best:  %s" % ", ".join(w for _, w, _ in scelte[:12]))
-    print("  worst kept: %s" % ", ".join(w for _, w, _ in scelte[-6:]))
-    print("  discarded:  %s" % ", ".join(w for _, w, _ in misurate[-8:]))
+    measured_words.sort(reverse=True, key=lambda x: x[0])
+    chosen = measured_words[:keep]
+    print("  keeping the %d most discriminating" % len(chosen))
+    print("  best:  %s" % ", ".join(w for _, w, _ in chosen[:12]))
+    print("  worst kept: %s" % ", ".join(w for _, w, _ in chosen[-6:]))
+    print("  discarded:  %s" % ", ".join(w for _, w, _ in measured_words[-8:]))
 
-    psql("DELETE FROM curator_dictionary WHERE modello <> '%s';" % modello)
-    blocco = []
-    for _, w, v in scelte:
-        blocco.append("('%s','[%s]','%s')" % (w.replace("'", "''"),
-                                              ",".join("%.6f" % x for x in v), modello))
-        if len(blocco) >= 40:
-            psql("INSERT INTO curator_dictionary (parola, vettore, modello) VALUES "
-                 + ",".join(blocco) + " ON CONFLICT (parola) DO NOTHING;")
-            blocco = []
-    if blocco:
-        psql("INSERT INTO curator_dictionary (parola, vettore, modello) VALUES "
-             + ",".join(blocco) + " ON CONFLICT (parola) DO NOTHING;")
+    psql("DELETE FROM autopilot_dictionary WHERE model <> '%s';" % model)
+    batch = []
+    for _, w, v in chosen:
+        batch.append("('%s','[%s]','%s')" % (w.replace("'", "''"),
+                                              ",".join("%.6f" % x for x in v), model))
+        if len(batch) >= 40:
+            psql("INSERT INTO autopilot_dictionary (word, vector, model) VALUES "
+                 + ",".join(batch) + " ON CONFLICT (word) DO NOTHING;")
+            batch = []
+    if batch:
+        psql("INSERT INTO autopilot_dictionary (word, vector, model) VALUES "
+             + ",".join(batch) + " ON CONFLICT (word) DO NOTHING;")
 
-    print("  words in the dictionary: %s" % psql("SELECT count(*) FROM curator_dictionary;").strip())
+    print("  words in the dictionary: %s" % psql("SELECT count(*) FROM autopilot_dictionary;").strip())
     print()
-    print("  NOTE: the rules in curator_rules refer to words by name. A rule")
+    print("  NOTE: the rules in autopilot_rules refer to words by name. A rule")
     print("  naming a word this list did not keep will never match - check them")
     print("  after switching dictionary.")
 

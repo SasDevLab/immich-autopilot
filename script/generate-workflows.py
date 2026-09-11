@@ -2,7 +2,7 @@
 """Build the n8n workflows from the SQL in this project.
 
 The workflows carry no addresses and no thresholds: the queries read those from
-curator_config, so a change there takes effect without touching a node. What
+autopilot_config, so a change there takes effect without touching a node. What
 cannot travel in a file is credentials, which n8n resolves by internal id -
 those are left as placeholders and connected once, by hand, after importing.
 
@@ -36,9 +36,9 @@ def telegram(name, text, pos):
 
 CODE_EVENTI = r"""// Decide what kind of event a period was, from what it is made of.
 //
-// Rules come from the database (curator_rules), not from here: they change
+// Rules come from the database (autopilot_rules), not from here: they change
 // with an UPDATE and no workflow edit. Thresholds arrive with the query, which
-// reads them from curator_config.
+// reads them from autopilot_config.
 //
 // Each rule has three parts:
 //   required : lists of words; at least one from EVERY list must be present.
@@ -80,10 +80,10 @@ for (const it of items) {
   const d = it.json;
   const ids = asList(d.ids);
   if (!ids || !ids.length) continue;
-  const raw = asList(d.concetti) || {};
+  const raw = asList(d.concepts) || {};
   const c = {}; for (const k in raw) c[k] = Number(raw[k]);
-  const rules = asList(d.regole) || [];
-  const presence = Number(d.presenza), margin = Number(d.margin);
+  const rules = asList(d.rules) || [];
+  const presence = Number(d.presence), margin = Number(d.margin);
 
   const { tipo, found, margin: got } = decide(c, rules, presence);
   const from = new Date(d.dal), to = new Date(d.al);
@@ -95,11 +95,11 @@ for (const it of items) {
   else period = from.getDate() + ' ' + month + ' - ' + to.getDate() + ' ' +
                 MONTHS[to.getMonth()] + ' ' + year;
 
-  const where = d.citta ? (' a ' + d.citta) : '';
+  const where = d.city ? (' a ' + d.city) : '';
   // no name when the evidence is thin: a wrong title is worse than none
   const name = (tipo && got >= margin)
       ? (tipo + where + ', ' + month + ' ' + year)
-      : ((d.citta ? d.citta + ', ' : '') + period);
+      : ((d.city ? d.city + ', ' : '') + period);
 
   result.push({ json: {
     azione: d.album_da_estendere ? 'estendi' : 'crea',
@@ -122,18 +122,18 @@ for (let i = 0; i < items.length; i++) {
   const o = before[i] ? before[i].json : {};
   const id = r.id || o.album_id;
   if (!id) continue;
-  out.push({ json: { album_id: id, dal: o.dal, al: o.al, nome: o.nome,
+  out.push({ json: { album_id: id, dal: o.dal, al: o.al, nome: o.name,
                      quante: o.quante, riconosciuto: o.riconosciuto, evidence: o.evidence } });
 }
 return out;"""
 
-REG_ALBUM = ("INSERT INTO curator_albums (album_id, dal, al, aggiornato)\n"
+REG_ALBUM = ("INSERT INTO autopilot_albums (album_id, dal, al, updated)\n"
              "VALUES ('{{ $json.album_id }}', '{{ $json.dal }}', '{{ $json.al }}', now())\n"
-             "ON CONFLICT (album_id) DO UPDATE SET dal = LEAST(curator_albums.dal, EXCLUDED.dal),\n"
-             "  al = GREATEST(curator_albums.al, EXCLUDED.al), aggiornato = now();")
+             "ON CONFLICT (album_id) DO UPDATE SET from_date = LEAST(autopilot_albums.from_date, EXCLUDED.dal),\n"
+             "  to_date = GREATEST(autopilot_albums.to_date, EXCLUDED.al), updated = now();")
 
 wf_album = {
- "name": "Immich curator - albums by event",
+ "name": "Immich autopilot - albums by event",
  "active": False,
  "nodes": [
   {"parameters": {"rule": {"interval": [{"field": "days", "triggerAtHour": 5, "triggerAtMinute": 15}]}},
@@ -154,7 +154,7 @@ wf_album = {
   {"parameters": {"method": "POST", "url": "={{ $json.immich_url }}/api/albums",
                   "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
                   "sendBody": True, "specifyBody": "json",
-                  "jsonBody": "={{ JSON.stringify({ albumName: $json.nome, assetIds: $json.ids }) }}",
+                  "jsonBody": "={{ JSON.stringify({ albumName: $json.name, assetIds: $json.ids }) }}",
                   "options": {}},
    "id": "e5", "name": "Create album", "type": "n8n-nodes-base.httpRequest",
    "typeVersion": 4.2, "position": [220, -110], "credentials": API,
@@ -174,7 +174,7 @@ wf_album = {
    "id": "e8", "name": "Record what was done", "type": "n8n-nodes-base.postgres",
    "typeVersion": 2.4, "position": [660, 0], "credentials": PG, "onError": "continueErrorOutput"},
   telegram("Alert ONLY on failure",
-           "=[Immich curator] albums: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nNo album was left half-written.",
+           "=[Immich autopilot] albums: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nNo album was left half-written.",
            [660, 220]),
  ],
  "connections": {
@@ -207,12 +207,12 @@ wf_album = {
 # API sees no change and skips the side effect. Hence the deliberate clear
 # before the set.
 
-REG_COVER = ("INSERT INTO curator_covers (person_id, face_id, aggiornato)\n"
+REG_COVER = ("INSERT INTO autopilot_covers (person_id, face_id, updated)\n"
              "SELECT id, \"faceAssetId\", now() FROM person WHERE id = '{{ $json.person_id }}'\n"
-             "ON CONFLICT (person_id) DO UPDATE SET face_id = EXCLUDED.face_id, aggiornato = now();")
+             "ON CONFLICT (person_id) DO UPDATE SET face_id = EXCLUDED.face_id, updated = now();")
 
 wf_cover = {
- "name": "Immich curator - person covers",
+ "name": "Immich autopilot - person covers",
  "active": False,
  "nodes": [
   {"parameters": {"rule": {"interval": [{"field": "days", "triggerAtHour": 4, "triggerAtMinute": 45}]}},
@@ -253,7 +253,7 @@ return out;"""},
    "id": "p6", "name": "Record what was done", "type": "n8n-nodes-base.postgres",
    "typeVersion": 2.4, "position": [440, 0], "credentials": PG, "onError": "continueErrorOutput"},
   telegram("Alert ONLY on failure",
-           "=[Immich curator] covers: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nCovers are unchanged.",
+           "=[Immich autopilot] covers: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}\n\nCovers are unchanged.",
            [440, 220]),
  ],
  "connections": {
@@ -282,7 +282,7 @@ return out;"""},
 # as "leave it alone", because its neighbours will now be split.
 
 wf_assign = {
- "name": "Immich curator - file into existing albums",
+ "name": "Immich autopilot - file into existing albums",
  "active": False,
  "nodes": [
   {"parameters": {"rule": {"interval": [{"field": "days", "triggerAtHour": 5, "triggerAtMinute": 0}]}},
@@ -301,7 +301,7 @@ wf_assign = {
    "typeVersion": 4.2, "position": [0, 0], "credentials": API,
    "onError": "continueErrorOutput", "retryOnFail": True, "maxTries": 2},
   telegram("Alert ONLY on failure",
-           "=[Immich curator] filing: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}",
+           "=[Immich autopilot] filing: failure.\n\n{{ JSON.stringify($json).slice(0,300) }}",
            [0, 200]),
  ],
  "connections": {

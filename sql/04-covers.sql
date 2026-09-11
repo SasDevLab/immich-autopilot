@@ -14,11 +14,11 @@
 -- pointer and leaves the old image in place.
 WITH cfg AS (
   SELECT
-    max(valore) FILTER (WHERE chiave='owner_email') AS owner_email,
-    max(valore) FILTER (WHERE chiave='immich_url')   AS immich_url,
-    max(valore) FILTER (WHERE chiave='cover_max_distance')::numeric AS max_dist,
-    max(valore) FILTER (WHERE chiave='cover_min_area')::numeric AS min_area
-  FROM curator_config
+    max(value) FILTER (WHERE key='owner_email') AS owner_email,
+    max(value) FILTER (WHERE key='immich_url')   AS immich_url,
+    max(value) FILTER (WHERE key='cover_max_distance')::numeric AS max_dist,
+    max(value) FILTER (WHERE key='cover_min_area')::numeric AS min_area
+  FROM autopilot_config
 ),
 eleggibili AS (
   -- people whose cover still matches what this job last set: anything else was
@@ -29,14 +29,14 @@ eleggibili AS (
   SELECT p.id
   FROM person p
   JOIN "user" u ON u.id = p."ownerId"
-  LEFT JOIN curator_covers cc ON cc.person_id = p.id
+  LEFT JOIN autopilot_covers cc ON cc.person_id = p.id
   WHERE ((SELECT owner_email FROM cfg) = '' OR u.email = (SELECT owner_email FROM cfg))
     AND (cc.person_id IS NULL OR p."faceAssetId" IS NOT DISTINCT FROM cc.face_id)
 ),
 centro AS (
   -- the "average face" of each person: the most typical face is usually the
   -- frontal, well-lit one, because odd angles sit far from the average
-  SELECT af."personId" pid, avg(fs.embedding) media
+  SELECT af."personId" pid, avg(fs.embedding) mean
   FROM asset_face af
   JOIN face_search fs ON fs."faceId" = af.id
   WHERE af."personId" IN (SELECT id FROM eleggibili) AND af."deletedAt" IS NULL
@@ -44,7 +44,7 @@ centro AS (
 ),
 volti AS (
   SELECT af."personId" pid, af.id fid, af."assetId" aid,
-         1 - (fs.embedding <=> c.media) AS tipicita,
+         1 - (fs.embedding <=> c.mean) AS tipicita,
          (af."boundingBoxX2"-af."boundingBoxX1")*(af."boundingBoxY2"-af."boundingBoxY1") AS area,
          -- a box touching the frame means the face is cut off
          (af."boundingBoxX1" <= 0.02*af."imageWidth" OR af."boundingBoxY1" <= 0.02*af."imageHeight"
@@ -57,13 +57,13 @@ volti AS (
              AND o."boundingBoxY1" < af."boundingBoxY2" + 0.4*(af."boundingBoxY2"-af."boundingBoxY1")
              AND o."boundingBoxY2" > af."boundingBoxY1" - 0.4*(af."boundingBoxY2"-af."boundingBoxY1")) AS vicini,
          a."fileCreatedAt" AS quando,
-         coalesce(col.bianco_e_nero, false) AS bianco_e_nero
+         coalesce(col.monochrome, false) AS monochrome
   FROM asset_face af
   JOIN face_search fs ON fs."faceId" = af.id
   JOIN centro c ON c.pid = af."personId"
   JOIN asset a ON a.id = af."assetId" AND a."deletedAt" IS NULL
   JOIN asset_file f ON f."assetId" = af."assetId" AND f.type = 'preview'
-  LEFT JOIN curator_colour col ON col.asset_id = af."assetId"
+  LEFT JOIN autopilot_colour col ON col.asset_id = af."assetId"
   WHERE af."deletedAt" IS NULL AND af."isVisible" = true
 ),
 massimi AS (
@@ -75,7 +75,7 @@ scelta AS (
   ORDER BY v.pid,
            -- colour first: monochrome is demoted, never excluded, so a person
            -- whose only decent shots are black and white keeps one
-           v.bianco_e_nero,
+           v.monochrome,
            (CASE WHEN v.tagliato THEN 1 ELSE 0 END),
            (CASE WHEN v.tipicita >= m.tip_max - (SELECT max_dist FROM cfg)
                   AND v.area >= (SELECT min_area FROM cfg) * m.area_max THEN 0 ELSE 1 END),
@@ -86,7 +86,7 @@ scelta AS (
 SELECT s.pid AS person_id,
        s.fid AS face_id,
        s.aid AS asset_id,
-       coalesce(nullif(p.name, ''), '(senza nome)') AS nome,
+       coalesce(nullif(p.name, ''), '(senza name)') AS name,
        (SELECT immich_url FROM cfg) AS immich_url
 FROM scelta s
 JOIN person p ON p.id = s.pid

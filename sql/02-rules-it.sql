@@ -17,7 +17,7 @@
 -- Change them with an UPDATE; no workflow edit is needed. Adding an event type
 -- means adding a row here, and adding the words it names to the dictionary.
 
-INSERT INTO curator_rules (type, required, evidence, against) VALUES
+INSERT INTO autopilot_rules (type, required, evidence, against) VALUES
 
 ('Matrimonio',
  '[["sposa","sposo","bouquet","anello"],["chiesa","altare","cerimonia","banchetto"]]',

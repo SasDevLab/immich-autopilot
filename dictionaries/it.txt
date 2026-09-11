@@ -1,7 +1,7 @@
 # Dizionario italiano: concetti comuni con cui descrivere una foto.
 #
 # Non e un elenco scritto guardando un archivio particolare: sono parole
-# ordinarie, e questo e cio che rende il curatore riutilizzabile altrove.
+# ordinarie, e questo e cio che rende l'autopilota riutilizzabile altrove.
 #
 # Aggiungere parole e legittimo e utile: piu il dizionario e ricco, piu eventi
 # si possono riconoscere. Dopo averle aggiunte, rilanciare build-dictionary.py,

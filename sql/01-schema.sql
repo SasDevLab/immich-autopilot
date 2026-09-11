@@ -1,17 +1,17 @@
--- Immich curator - supporting tables
+-- Immich autopilot - supporting tables
 --
 -- These live in Immich's own database under their own prefix. Immich ignores
 -- tables it does not know about, so they survive upgrades untouched, and a DROP
 -- removes every trace if you change your mind.
 
 -- Settings --------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS curator_config (
+CREATE TABLE IF NOT EXISTS autopilot_config (
   key         text PRIMARY KEY,
   value       text NOT NULL,
   description text
 );
 
-INSERT INTO curator_config (key, value, description) VALUES
+INSERT INTO autopilot_config (key, value, description) VALUES
  ('owner_email', '',
   'Immich user to work on. Empty means every user. Careful: an API key belongs to one user, and writing to another user''s people fails with 403.'),
  ('timezone', 'Europe/Rome',
@@ -50,7 +50,7 @@ INSERT INTO curator_config (key, value, description) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 -- Dictionary: a word and its vector ---------------------------------------------
-CREATE TABLE IF NOT EXISTS curator_dictionary (
+CREATE TABLE IF NOT EXISTS autopilot_dictionary (
   word    text PRIMARY KEY,
   vector  vector(768) NOT NULL,
   model   text NOT NULL,
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS curator_dictionary (
 );
 
 -- Rules: what makes an event that kind of event ---------------------------------
-CREATE TABLE IF NOT EXISTS curator_rules (
+CREATE TABLE IF NOT EXISTS autopilot_rules (
   type     text PRIMARY KEY,
   -- lists of words; at least one from every list must be present
   required jsonb NOT NULL,
@@ -69,17 +69,17 @@ CREATE TABLE IF NOT EXISTS curator_rules (
   active   boolean NOT NULL DEFAULT true
 );
 
--- Memory: what the curator did.
+-- Memory: what the autopilot did.
 -- Two purposes: not redoing settled work, and leaving alone anything a person
 -- has since changed by hand. A manual choice wins for good.
-CREATE TABLE IF NOT EXISTS curator_albums (
+CREATE TABLE IF NOT EXISTS autopilot_albums (
   album_id  uuid PRIMARY KEY,
   from_date date NOT NULL,
   to_date   date NOT NULL,
   updated   timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS curator_covers (
+CREATE TABLE IF NOT EXISTS autopilot_covers (
   person_id uuid PRIMARY KEY,
   face_id   uuid NOT NULL,
   updated   timestamptz NOT NULL DEFAULT now()
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS curator_covers (
 -- a black and white JPEG still records itself as sRGB, and asking the model for
 -- "black and white" returns colour photos among the top hits. Only the pixels
 -- say so, which is why this is measured once and stored.
-CREATE TABLE IF NOT EXISTS curator_colour (
+CREATE TABLE IF NOT EXISTS autopilot_colour (
   asset_id   uuid PRIMARY KEY,
   spread     numeric NOT NULL,
   monochrome boolean NOT NULL,

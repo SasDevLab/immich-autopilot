@@ -1,4 +1,4 @@
-# Immich curator
+# Immich autopilot
 
 Works out **what kind of event** a group of photos was — a wedding, a christening,
 a week by the sea — and creates the album with that name.
@@ -31,7 +31,7 @@ person.
 
 ## How it works
 
-Immich turns every photo into a vector of 768 numbers. The curator does the same
+Immich turns every photo into a vector of 768 numbers. The autopilot does the same
 with a **dictionary of ordinary words** — common terms, not phrases written while
 looking at one particular library — and compares.
 
@@ -81,7 +81,7 @@ collect photos over years accept anything.
 ./script/install.sh
 ```
 
-Checks the prerequisites, creates the tables (all prefixed `curator_`, which
+Checks the prerequisites, creates the tables (all prefixed `autopilot_`, which
 Immich ignores), loads the rules and builds the dictionary. Creating the n8n
 credentials and importing the workflows is left to you; the script prints what
 to do.
@@ -104,7 +104,7 @@ between knowing and hoping.
 
 Everything lives in two tables, changed with an `UPDATE`, no workflow edit.
 
-`curator_config` — the knobs:
+`autopilot_config` — the knobs:
 
 | key | default | effect |
 |---|---|---|
@@ -118,7 +118,7 @@ Everything lives in two tables, changed with an `UPDATE`, no workflow edit.
 | `assign_agreement` | 0.8 | what share of neighbours must agree |
 | `owner_email` | *(empty)* | which user to work on; empty means all |
 
-`curator_rules` — what makes an event that kind of event. Adding a type means
+`autopilot_rules` — what makes an event that kind of event. Adding a type means
 adding a row, and adding the words it names to the dictionary.
 
 ## Dictionaries
@@ -148,7 +148,7 @@ there would be location, and that requires photos to carry it.
 
 **It adds, it never removes.** A photo that stops matching stays where it is.
 
-**Manual choices win.** The curator records what it did; anything changed by hand
+**Manual choices win.** The autopilot records what it did; anything changed by hand
 afterwards is left alone from then on.
 
 ## Credit
