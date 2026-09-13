@@ -42,12 +42,12 @@ FONTE = ("https://raw.githubusercontent.com/hermitdave/FrequencyWords"
 # Frequency lists start with function words. Rather than a language-specific
 # stoplist, skip the very top of the list and anything too short: between them
 # they remove nearly all of it, in any language.
-SALTA_INIZIALI = 150
+SKIP_FIRST = 150
 LUNGHEZZA_MINIMA = 4
 
 # A word phrased as a caption matches better than a bare token: these models are
 # trained on descriptions of images, not on vocabulary lists.
-MODELLO_FRASE = {"it": "una foto di %s", "en": "a photo of %s"}
+PHRASE_BY_LANG = {"it": "una foto di %s", "en": "a photo of %s"}
 
 
 def psql(sql):
@@ -73,7 +73,7 @@ def embed(text, model):
 
 def main():
     def arg(name, pred):
-        return sys.argv[sys.argv.index(name) + 1] if nome in sys.argv else pred
+        return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else pred
 
     language = arg("--lang", "it")
     candidates = int(arg("--candidates", "1200"))
@@ -94,23 +94,23 @@ def main():
         print("  downloading %s ..." % url)
         r = subprocess.run(["docker", "exec", SERVER, "curl", "-s", "-m", "60", url],
                            capture_output=True, text=True)
-        righe = [l.split()[0] for l in r.stdout.splitlines() if l.split()]
-        if len(righe) < 1000:
-            print("  list not reachable (%d lines). Use --file with a local one." % len(righe))
+        rows = [l.split()[0] for l in r.stdout.splitlines() if l.split()]
+        if len(rows) < 1000:
+            print("  list not reachable (%d lines). Use --file with a local one." % len(rows))
             sys.exit(1)
-        words = [w for w in righe[SALTA_INIZIALI:]
+        words = [w for w in rows[SKIP_FIRST:]
                   if len(w) >= LUNGHEZZA_MINIMA and w.isalpha()]
-        print("  %d words in the list, %d usable" % (len(righe), len(words)))
+        print("  %d words in the list, %d usable" % (len(rows), len(words)))
     words = words[:candidates]
 
     # --- a sample of real photos to measure against ---------------------------
-    righe = psql("SELECT s.embedding::text FROM smart_search s "
+    rows = psql("SELECT s.embedding::text FROM smart_search s "
                  "JOIN asset a ON a.id = s.\"assetId\" AND a.\"deletedAt\" IS NULL "
                  "ORDER BY random() LIMIT %d;" % sample)
     photos = []
-    for l in righe.splitlines():
+    for l in rows.splitlines():
         if l.startswith("["):
-            foto.append([float(x) for x in l.strip("[]").split(",")])
+            photos.append([float(x) for x in l.strip("[]").split(",")])
     if len(photos) < 50:
         print("  too few indexed photos (%d): run Smart Search first" % len(photos)); sys.exit(1)
     print("  measuring against %d photos" % len(photos))
@@ -119,16 +119,16 @@ def main():
     def unit(v):
         n = sum(x * x for x in v) ** 0.5
         return [x / n for x in v] if n else v
-    photos = [unit(v) for v in foto]
+    photos = [unit(v) for v in photos]
 
-    phrase = MODELLO_FRASE.get(language, "%s")
+    phrase = PHRASE_BY_LANG.get(language, "%s")
     measured_words = []
     for i, w in enumerate(words, 1):
         v = embed(phrase % w, model)
         if v is None:
             continue
         v = unit(v)
-        sim = [sum(a * b for a, b in zip(v, f)) for f in foto]
+        sim = [sum(a * b for a, b in zip(v, f)) for f in photos]
         mean = sum(sim) / len(sim)
         # spread is what matters: a word close to everything equally describes
         # nothing, however high its average similarity
