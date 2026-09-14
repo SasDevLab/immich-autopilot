@@ -107,7 +107,51 @@ giorni_buoni AS (
   JOIN forti f ON f.aid = ev.aid
   JOIN top5 t ON t.isola = ev.isola AND t.word = f.word
 ),
-potato AS (SELECT isola, min(g) dal, max(g) al FROM giorni_buoni GROUP BY isola),
+potato_grezzo AS (SELECT isola, min(g) dal, max(g) al FROM giorni_buoni GROUP BY isola),
+-- Una giornata passata INTERAMENTE a casa non appartiene a un evento che si
+-- svolge altrove. Tre giorni di mare a Vieste si tiravano dietro il rientro e
+-- i due giorni dopo a Giovinazzo; il concerto a Caserta si portava una pizza a
+-- Bari e una serata in paese.
+--
+-- La condizione e' "TUTTE le foto del giorno", non "il baricentro del giorno":
+-- la giornata della partenza ha due foto all'aeroporto di Bari e undici in
+-- Francia, e deve restare intera, perche' l'aeroporto fa parte del viaggio. I
+-- giorni da togliere invece sono puri - tre foto su tre a casa, sei su sei.
+giorni_a_casa AS (
+  SELECT t.isola, ev.g
+  FROM potato_grezzo t
+  JOIN ev ON ev.isola = t.isola AND ev.g BETWEEN t.dal AND t.al
+  CROSS JOIN casa h
+  WHERE ev.lat IS NOT NULL
+  GROUP BY t.isola, ev.g, h.la, h.lo
+  HAVING count(*) FILTER (
+           WHERE 6371*acos(least(1,greatest(-1,
+             sin(radians(h.la))*sin(radians(ev.lat))
+             + cos(radians(h.la))*cos(radians(ev.lat))*cos(radians(ev.lon - h.lo)))))
+                 > (SELECT home_km FROM cfg)) = 0
+),
+-- Se anche il nucleo dell'evento e' a casa non si toglie niente: un compleanno
+-- in paese e' fatto per forza di giorni passati a casa.
+nucleo AS (
+  SELECT t.isola, t.dal, t.al,
+         max(6371*acos(least(1,greatest(-1,
+           sin(radians(h.la))*sin(radians(ev.lat))
+           + cos(radians(h.la))*cos(radians(ev.lat))*cos(radians(ev.lon - h.lo)))))) km_max
+  FROM potato_grezzo t
+  JOIN ev ON ev.isola = t.isola AND ev.g BETWEEN t.dal AND t.al
+  CROSS JOIN casa h
+  WHERE ev.lat IS NOT NULL
+  GROUP BY t.isola, t.dal, t.al
+),
+giorni_tenuti AS (
+  SELECT n.isola, ev.g
+  FROM nucleo n
+  JOIN ev ON ev.isola = n.isola AND ev.g BETWEEN n.dal AND n.al
+  WHERE n.km_max <= (SELECT home_km FROM cfg)
+     OR NOT EXISTS (SELECT 1 FROM giorni_a_casa c WHERE c.isola = n.isola AND c.g = ev.g)
+  GROUP BY n.isola, ev.g
+),
+potato AS (SELECT isola, min(g) dal, max(g) al FROM giorni_tenuti GROUP BY isola),
 -- Un'occasione RICONOSCIUTA non e' "una parola frequente": e' un gruppo di
 -- parole che una regola attiva pretende, tutte presenti. Senza questo passavano
 -- 'giocattolo 80%' (sono solo giocattoli sul tappeto) e 'schermo 48%' (la vita
