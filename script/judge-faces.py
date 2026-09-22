@@ -85,9 +85,13 @@ def unit(v):
 
 def text_vector(phrase, model):
     out = in_server(
-        "curl -s -m 60 -X POST %s/predict "
+        "curl -s -m 300 -X POST %s/predict "
         "-F 'entries={\"clip\":{\"textual\":{\"modelName\":\"%s\"}}}' "
         "-F \"text=%s\"" % (ML, model, phrase))
+    if not out.strip():
+        # L'errore che usciva prima - json.loads su stringa vuota, quindi
+        # "Expecting value: line 1 column 1" - non faceva capire niente.
+        raise SystemExit('  il servizio di machine learning non ha risposto in tempo. Di solito vuol dire che stava caricando il modello e la macchina era occupata (il 22/09/2026 alle 04:30, con il backup delle 04:15 ancora in corso). A macchina scarica il caricamento richiede 14 secondi.')
     return unit(json.loads(json.loads(out)["clip"]))
 
 
@@ -111,7 +115,7 @@ def crop_vector(path, x1, y1, x2, y2, model):
     cx, cy = max(0, x1 - mx), max(0, y1 - my)
     out = in_server(
         'ffmpeg -loglevel error -y -i "%s" -vf "crop=%d:%d:%d:%d,scale=256:256" /tmp/j.jpg '
-        '&& curl -s -m 60 -X POST %s/predict '
+        '&& curl -s -m 300 -X POST %s/predict '
         '-F \'entries={"clip":{"visual":{"modelName":"%s"}}}\' -F "image=@/tmp/j.jpg"'
         % (path, w + 2 * mx, h + 2 * my, cx, cy, ML, model))
     subprocess.run(["docker", "cp", "%s:/tmp/j.jpg" % SERVER, "/tmp/j.jpg"], capture_output=True)
