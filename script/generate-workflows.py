@@ -208,7 +208,7 @@ wf_album = {
 # before the set.
 
 REG_COVER = ("INSERT INTO autopilot_covers (person_id, face_id, updated)\n"
-             "SELECT id, \"faceAssetId\", now() FROM person WHERE id = '{{ $json.person_id }}'\n"
+             "SELECT \"personGroupId\", \"faceAssetId\", now() FROM person WHERE \"personGroupId\" = '{{ $json.person_id }}'\n"
              "ON CONFLICT (person_id) DO UPDATE SET face_id = EXCLUDED.face_id, updated = now();")
 
 wf_cover = {

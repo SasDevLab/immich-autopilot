@@ -3,10 +3,10 @@
 -- Salta chi ha una copertina scelta a mano (diversa da quella che questa
 -- procedura aveva impostato l'ultima volta): quelle scelte vincono per sempre.
 WITH ammesse AS (
-  SELECT p.id
+  SELECT p."personGroupId" AS id
   FROM person p
   JOIN "user" u ON u.id = p."ownerId"
-  LEFT JOIN autopilot_covers ac ON ac.person_id = p.id
+  LEFT JOIN autopilot_covers ac ON ac.person_id = p."personGroupId"
   -- In Immich le persone sono PRIVATE di ogni utente: ognuno ha le proprie,
   -- riconosciute sulle proprie foto. La chiave API con cui si applica la
   -- modifica appartiene a questo utente, quindi tentare di scrivere sulle
@@ -15,20 +15,20 @@ WITH ammesse AS (
     AND (ac.person_id IS NULL OR p."faceAssetId" IS NOT DISTINCT FROM ac.face_id)
 ),
 centro AS (
-  SELECT af."personId" pid, avg(fs.embedding) media
+  SELECT af."personGroupId" pid, avg(fs.embedding) media
   FROM asset_face af JOIN face_search fs ON fs."faceId" = af.id
   JOIN asset a2 ON a2.id = af."assetId" AND a2."deletedAt" IS NULL
-  WHERE af."personId" IN (SELECT id FROM ammesse) AND af."deletedAt" IS NULL
+  WHERE af."personGroupId" IN (SELECT id FROM ammesse) AND af."deletedAt" IS NULL
     -- La faccia media si calcola SOLO sulle foto recenti. Con 451 volti del
     -- 2021 contro 168 del 2026, la media era il volto di cinque anni fa e
     -- vincevano sempre le scansioni vecchie: la foto piu' TIPICA non e' la
     -- foto piu' ATTUALE.
     AND a2."fileCreatedAt" > now() - ((SELECT max(value) FROM autopilot_config
                                         WHERE key='cover_months') || ' months')::interval
-  GROUP BY af."personId"
+  GROUP BY af."personGroupId"
 ),
 volti AS (
-  SELECT af."personId" pid, af.id fid, af."assetId" aid,
+  SELECT af."personGroupId" pid, af.id fid, af."assetId" aid,
          1 - (fs.embedding <=> c.media) tip,
          (af."boundingBoxX2"-af."boundingBoxX1")*(af."boundingBoxY2"-af."boundingBoxY1") area,
          (af."boundingBoxX1" <= 0.02*af."imageWidth" OR af."boundingBoxY1" <= 0.02*af."imageHeight"
@@ -70,7 +70,7 @@ volti AS (
          coalesce(q.sharpness, 0) AS nitidezza
   FROM asset_face af
   JOIN face_search fs ON fs."faceId" = af.id
-  JOIN centro c ON c.pid = af."personId"
+  JOIN centro c ON c.pid = af."personGroupId"
   JOIN asset a ON a.id = af."assetId" AND a."deletedAt" IS NULL
   JOIN asset_file f ON f."assetId" = af."assetId" AND f.type = 'preview'
   LEFT JOIN autopilot_colour col ON col.asset_id = af."assetId"
@@ -84,7 +84,7 @@ volti AS (
 SELECT v.pid AS person_id,
        max(v.tip)  AS tmax,
        max(v.area) AS amax,
-       (SELECT "faceAssetId" FROM person WHERE id = v.pid) AS attuale,
+       (SELECT "faceAssetId" FROM person WHERE "personGroupId" = v.pid) AS attuale,
        json_agg(json_build_object('fid', v.fid, 'aid', v.aid, 'tip', v.tip, 'area', v.area,
                                   'tagliato', v.tagliato, 'vicini', v.vicini, 'data', v.data,
                                   'bn', v.bn,

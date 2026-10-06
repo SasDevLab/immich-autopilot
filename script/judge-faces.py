@@ -151,11 +151,11 @@ def main():
                af."boundingBoxX1" x1, af."boundingBoxY1" y1,
                af."boundingBoxX2" x2, af."boundingBoxY2" y2,
                a."originalFileName" file, to_char(a."fileCreatedAt",'YYYY-MM-DD') taken,
-               row_number() OVER (PARTITION BY p.id ORDER BY
+               row_number() OVER (PARTITION BY p."personGroupId" ORDER BY
                  (af."boundingBoxX2"-af."boundingBoxX1")*(af."boundingBoxY2"-af."boundingBoxY1") DESC) rn
         FROM person p
         JOIN "user" u ON u.id = p."ownerId"
-        JOIN asset_face af ON af."personId" = p.id AND af."deletedAt" IS NULL AND af."isVisible"
+        JOIN asset_face af ON af."personGroupId" = p."personGroupId" AND af."deletedAt" IS NULL AND af."isVisible"
         JOIN asset a ON a.id = af."assetId" AND a."deletedAt" IS NULL
         JOIN asset_file f ON f."assetId" = a.id AND f.type = 'preview'
         WHERE a."fileCreatedAt" > now() - interval '%d months'
