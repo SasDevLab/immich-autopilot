@@ -1,0 +1,2 @@
+# I flussi esportati da n8n contengono identificativi di chat e nomi di casa.
+n8n/** filter=git-crypt diff=git-crypt
